@@ -11,12 +11,11 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 jobs:
   publish:
     runs-on: macos-14
+    permissions:
+      contents: write
 
     steps:
       - name: Check out release source
@@ -49,3 +48,64 @@ jobs:
               --generate-notes \
               --prerelease
           fi
+
+      - name: Generate signed update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_PRIVATE_KEY" || {
+            echo "Missing SPARKLE_PRIVATE_KEY repository secret." >&2
+            exit 1
+          }
+
+          version="${TAG_NAME#v}"
+          archive="AIUsageBar-v${version}-macos-arm64.zip"
+          site="site"
+          feed_url="https://perththeiamcat.github.io/AI_Usage/appcast.xml"
+          download_prefix="https://github.com/PerthTheIamCat/AI_Usage/releases/download/${TAG_NAME}/"
+
+          mkdir -p "$site"
+          curl --fail --silent --show-error "$feed_url" -o "$site/appcast.xml" || true
+          cp "$archive" "$site/"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+              --ed-key-file - \
+              --download-url-prefix "$download_prefix" \
+              --full-release-notes-url "https://github.com/PerthTheIamCat/AI_Usage/releases/tag/${TAG_NAME}" \
+              --link "https://github.com/PerthTheIamCat/AI_Usage" \
+              --maximum-versions 1 \
+              -o "$site/appcast.xml" \
+              "$site"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            .build/artifacts/sparkle/Sparkle/bin/sign_update \
+              --ed-key-file - \
+              --disable-signing-warning \
+              "$site/appcast.xml"
+
+          rm "$site/$archive"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload update feed
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy-pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy update feed
+        id: deployment
+        uses: actions/deploy-pages@v4

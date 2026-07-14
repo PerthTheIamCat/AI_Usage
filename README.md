@@ -40,6 +40,8 @@ No setup screen. The app detects the CLIs from `~/.claude` and `~/.codex`.
    Claude limits.
 5. Click the menu-bar icon whenever you want the detailed breakdown. Press
    `⌘R` or choose **Refresh Now** to request a fresh reading.
+6. From version 0.2.0 onward, the app checks for updates automatically. Use
+   **Check for Updates…** from the menu whenever you want to check now.
 
 To start it automatically: **System Settings → General → Login Items → Add**
 `AIUsageBar.app`.
@@ -65,7 +67,8 @@ a `429`. Use **Refresh Now** sparingly.
 - A Codex limit window may be stale until you open Codex again.
 - When a Claude request is rate-limited, the app shows `…` until the next
   allowed refresh instead of guessing a percentage.
-- Preview releases are not yet Developer ID signed or notarized.
+- Preview releases are not yet Developer ID signed or notarized. The first
+  install may still need the Control-click → **Open** step above.
 
 ## Build from source
 
@@ -80,13 +83,15 @@ open AIUsageBar.app
 
 ## Releases for maintainers
 
-Push a version tag such as `v0.1.1`. GitHub Actions builds an Apple Silicon ZIP
-and SHA-256 checksum, then publishes a prerelease automatically. For a tag that
+Push a version tag such as `v0.2.0`. GitHub Actions builds an Apple Silicon ZIP
+and SHA-256 checksum, publishes a prerelease, then signs and deploys the
+Sparkle update feed to GitHub Pages. The private Sparkle key is stored only as
+the `SPARKLE_PRIVATE_KEY` repository secret; never commit it. For a tag that
 already exists, run **Publish release** manually from GitHub Actions and enter
 the tag name.
 
 ```sh
-./make-release.sh 0.1.1
+./make-release.sh 0.2.0 2
 ```
 
 ## License
