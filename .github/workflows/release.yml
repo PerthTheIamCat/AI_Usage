@@ -50,8 +50,8 @@ jobs:
           ' CHANGELOG.md > "$notes_file"
 
           if [[ ! -s "$notes_file" ]]; then
-            echo "No CHANGELOG.md section found for $version" >&2
-            exit 1
+            echo "No CHANGELOG.md section found for $version; using fallback release notes." >&2
+            printf 'Release %s\n' "$TAG_NAME" > "$notes_file"
           fi
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
