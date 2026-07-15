@@ -50,7 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
-    <key>SUFeedURL</key><string>https://perththeiamcat.github.io/AI_Usage/appcast.xml</string>
+    <key>SUFeedURL</key><string>https://perththeiamcat.github.io/ai-usage-bar/appcast.xml</string>
     <key>SUPublicEDKey</key><string>GZz3+3QtNsOQQuZ0OdbFyFuua1WkN3uWj11cx/WGkSc=</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUAutomaticallyUpdate</key><true/>

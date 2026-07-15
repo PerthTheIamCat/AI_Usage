@@ -6,8 +6,8 @@ AI Usage Bar is a small macOS menu-bar app for people who use Claude Code,
 Codex, or both. It shows today's token activity and the remaining time and
 percentage in each provider's active rate-limit window.
 
-[Download a preview release](https://github.com/PerthTheIamCat/AI_Usage/releases)
-· [Report an issue](https://github.com/PerthTheIamCat/AI_Usage/issues)
+[Download a preview release](https://github.com/PerthTheIamCat/ai-usage-bar/releases)
+· [Report an issue](https://github.com/PerthTheIamCat/ai-usage-bar/issues)
 
 **Requirements:** macOS 13 or later · Apple Silicon · Claude Code and/or Codex
 already installed and signed in.
@@ -28,7 +28,7 @@ No setup screen. The app detects the CLIs from `~/.claude` and `~/.codex`.
 
 ## Install and use
 
-1. Open the [Releases](https://github.com/PerthTheIamCat/AI_Usage/releases)
+1. Open the [Releases](https://github.com/PerthTheIamCat/ai-usage-bar/releases)
    page and download the `macos-arm64.zip` file.
 2. Double-click the ZIP, then move `AIUsageBar.app` to `/Applications` if you
    want to keep it there.

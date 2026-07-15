@@ -81,8 +81,8 @@ jobs:
           version="${TAG_NAME#v}"
           archive="AIUsageBar-v${version}-macos-arm64.zip"
           site="site"
-          feed_url="https://perththeiamcat.github.io/AI_Usage/appcast.xml"
-          download_prefix="https://github.com/PerthTheIamCat/AI_Usage/releases/download/${TAG_NAME}/"
+          feed_url="https://perththeiamcat.github.io/ai-usage-bar/appcast.xml"
+          download_prefix="https://github.com/PerthTheIamCat/ai-usage-bar/releases/download/${TAG_NAME}/"
 
           mkdir -p "$site"
           curl --fail --silent --show-error "$feed_url" -o "$site/appcast.xml" || true
@@ -92,8 +92,8 @@ jobs:
             .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
               --ed-key-file - \
               --download-url-prefix "$download_prefix" \
-              --full-release-notes-url "https://github.com/PerthTheIamCat/AI_Usage/releases/tag/${TAG_NAME}" \
-              --link "https://github.com/PerthTheIamCat/AI_Usage" \
+              --full-release-notes-url "https://github.com/PerthTheIamCat/ai-usage-bar/releases/tag/${TAG_NAME}" \
+              --link "https://github.com/PerthTheIamCat/ai-usage-bar" \
               --maximum-versions 1 \
               -o "$site/appcast.xml" \
               "$site"
