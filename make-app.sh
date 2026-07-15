@@ -2,8 +2,8 @@
 # Build AIUsageBar.app bundle from the Swift package.
 set -e
 cd "$(dirname "$0")"
-VERSION="${VERSION:-0.3.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-4}"
+VERSION="${VERSION:-0.3.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-5}"
 # Ad-hoc signatures ("-") change on every build, which makes macOS forget the
 # keychain "Always Allow" grant and re-prompt for the login password. Default
 # to the local "AIUsageBar Signing" self-signed cert when it exists so the

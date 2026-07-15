@@ -2,6 +2,17 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
+## [0.3.1] - 2026-07-15
+
+### Fixed
+
+- Point the Sparkle update feed and repository links at the renamed repo
+  (`AI_Usage` → `ai-usage-bar`); the old appcast URL now 404s, so builds
+  carrying it cannot auto-update. **v0.3.0 shipped with the dead feed URL —
+  install this version instead.**
+- Recheck an expired login every minute (instead of every 5) so the display
+  recovers almost as soon as the Claude CLI writes a fresh token.
+
 ## [0.3.0] - 2026-07-15
 
 ### Added
