@@ -33,6 +33,19 @@ struct CodexUsage {
 struct AntigravityUsage {
     var totalPrompts = 0
     var sessionCount = 0
+    var fiveHour: LimitWindow?
+    var weekly: LimitWindow?
+    var isWorking = false
+}
+
+struct HourlyUsage {
+    var values = Array(repeating: 0, count: 24)
+
+    var total: Int { values.reduce(0, +) }
+    var peakHour: Int? {
+        guard let peak = values.max(), peak > 0 else { return nil }
+        return values.firstIndex(of: peak)
+    }
 }
 
 struct UsageSnapshot {
@@ -41,6 +54,7 @@ struct UsageSnapshot {
     var antigravity: AntigravityUsage? // nil = not detected
     var claudeLimits: ClaudeLimits?
     var codexLimits: CodexLimits?
+    var hourlyUsage = HourlyUsage()
     var updatedAt = Date()
 }
 

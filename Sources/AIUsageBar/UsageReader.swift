@@ -25,11 +25,81 @@ enum UsageReader {
         if fm.fileExists(atPath: antigravityDir.path) {
             snap.antigravity = readAntigravityToday()
         }
+        snap.hourlyUsage = readHourlyUsage()
         snap.updatedAt = Date()
         return snap
     }
 
     // MARK: - Shared helpers
+
+    private static func localHour(_ date: Date) -> Int {
+        Calendar.current.component(.hour, from: date)
+    }
+
+    private static func readHourlyUsage() -> HourlyUsage {
+        var usage = HourlyUsage()
+
+        // Claude assistant records contain the actual token usage for each
+        // completed response.
+        if FileManager.default.fileExists(atPath: claudeDir.path) {
+            for file in filesModifiedToday(under: claudeDir, ext: "jsonl") {
+                forEachLine(of: file) { line in
+                    guard line.contains("\"usage\""), line.contains("\"assistant\""),
+                          let data = line.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          (obj["type"] as? String) == "assistant",
+                          let ts = obj["timestamp"] as? String,
+                          isTodayLocal(isoTimestamp: ts),
+                          let message = obj["message"] as? [String: Any],
+                          let tokenUsage = message["usage"] as? [String: Any],
+                          let date = parseISO(ts)
+                    else { return }
+                    let tokens = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+                        .reduce(0) { $0 + ((tokenUsage[$1] as? Int) ?? 0) }
+                    usage.values[localHour(date)] += tokens
+                }
+            }
+        }
+
+        // Codex token_count events are cumulative per session; add only the
+        // delta between consecutive readings to avoid counting the same turn
+        // repeatedly.
+        if FileManager.default.fileExists(atPath: codexDir.path) {
+            for file in filesModifiedToday(under: codexDir, ext: "jsonl") {
+                var previous = 0
+                forEachLine(of: file) { line in
+                    guard line.contains("\"token_count\""),
+                          let data = line.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let ts = obj["timestamp"] as? String,
+                          isTodayLocal(isoTimestamp: ts),
+                          let payload = obj["payload"] as? [String: Any],
+                          (payload["type"] as? String) == "token_count",
+                          let info = payload["info"] as? [String: Any],
+                          let totals = info["total_token_usage"] as? [String: Any],
+                          let total = totals["total_tokens"] as? Int,
+                          let date = parseISO(ts)
+                    else { return }
+                    let delta = max(0, total - previous)
+                    usage.values[localHour(date)] += delta
+                    previous = max(previous, total)
+                }
+            }
+        }
+
+        if FileManager.default.fileExists(atPath: antigravityDir.path) {
+            let historyFile = antigravityDir.appendingPathComponent("history.jsonl")
+            forEachLine(of: historyFile) { line in
+                guard let data = line.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let timestampMS = obj["timestamp"] as? Double
+                else { return }
+                let date = Date(timeIntervalSince1970: timestampMS / 1000.0)
+                if Calendar.current.isDateInToday(date) { usage.values[localHour(date)] += 1 }
+            }
+        }
+        return usage
+    }
 
     private static func filesModifiedToday(under root: URL, ext: String) -> [URL] {
         let fm = FileManager.default
@@ -257,7 +327,12 @@ enum UsageReader {
     private static func readAntigravityToday() -> AntigravityUsage {
         var usage = AntigravityUsage()
         let historyFile = antigravityDir.appendingPathComponent("history.jsonl")
-        guard FileManager.default.fileExists(atPath: historyFile.path) else { return usage }
+        usage.fiveHour = readAntigravityLimit(shortWindow: true)
+        usage.weekly = readAntigravityLimit(shortWindow: false)
+        guard FileManager.default.fileExists(atPath: historyFile.path) else {
+            usage.isWorking = antigravityIsWorking()
+            return usage
+        }
         var uniqueSessions = Set<String>()
         forEachLine(of: historyFile) { line in
             guard let data = line.data(using: .utf8),
@@ -273,6 +348,77 @@ enum UsageReader {
             }
         }
         usage.sessionCount = uniqueSessions.count
+        usage.isWorking = antigravityIsWorking()
         return usage
+    }
+
+    /// Antigravity stores quota responses in different cache locations across
+    /// CLI versions. Read only JSON responses that contain the stable
+    /// remainingFraction/resetTime pair, and classify the two windows by the
+    /// time until reset (short = 5-hour, long = weekly).
+    private static func readAntigravityLimit(shortWindow: Bool) -> LimitWindow? {
+        let fm = FileManager.default
+        let roots = [
+            antigravityDir.appendingPathComponent("cache"),
+            antigravityDir.appendingPathComponent("state"),
+            antigravityDir
+        ]
+        var newest: (window: LimitWindow, modified: Date)?
+        for root in roots {
+            guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) else { continue }
+            for case let url as URL in en {
+                guard url.pathExtension == "json",
+                      let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let modified = values.contentModificationDate,
+                      let data = try? Data(contentsOf: url),
+                      let object = try? JSONSerialization.jsonObject(with: data)
+                else { continue }
+                for candidate in quotaCandidates(in: object) {
+                    let until = candidate.reset.timeIntervalSinceNow
+                    let isShort = until > 0 && until <= 12 * 3600
+                    guard isShort == shortWindow else { continue }
+                    let window = LimitWindow(usedPercent: max(0, min(100, (1 - candidate.remaining) * 100)), resetsAt: candidate.reset)
+                    if newest == nil || modified > newest!.modified { newest = (window, modified) }
+                }
+            }
+        }
+        return newest?.window
+    }
+
+    private static func quotaCandidates(in object: Any) -> [(remaining: Double, reset: Date)] {
+        var result: [(Double, Date)] = []
+        func walk(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                if let fraction = (dict["remainingFraction"] as? Double) ?? (dict["remainingFraction"] as? Int).map(Double.init),
+                   let resetString = dict["resetTime"] as? String,
+                   let reset = parseISO(resetString) ?? ISO8601DateFormatter().date(from: resetString),
+                   fraction >= 0, fraction <= 1 {
+                    result.append((fraction, reset))
+                }
+                dict.values.forEach(walk)
+            } else if let array = value as? [Any] {
+                array.forEach(walk)
+            }
+        }
+        walk(object)
+        return result
+    }
+
+    private static func antigravityIsWorking() -> Bool {
+        let logs = antigravityDir.appendingPathComponent("log")
+        guard let files = try? FileManager.default.contentsOfDirectory(at: logs, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles),
+              let file = files.filter({ $0.pathExtension == "log" }).max(by: { modifiedDate($0) < modifiedDate($1) }),
+              let data = try? Data(contentsOf: file), let text = String(data: data, encoding: .utf8)
+        else { return false }
+        let started = text.range(of: "Starting conversation update stream", options: .backwards)
+            ?? text.range(of: "HandleUserInput called", options: .backwards)
+        let finished = text.range(of: "Stream completed", options: .backwards)
+            ?? text.range(of: "Stream goroutine exited", options: .backwards)
+        return started != nil && (finished == nil || started!.lowerBound > finished!.lowerBound)
+    }
+
+    private static func modifiedDate(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 }

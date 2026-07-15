@@ -258,3 +258,89 @@ func limitRowItem(name: String, window: LimitWindow) -> NSMenuItem {
     view.addSubview(resets)
     return viewItem(view, accessibilityLabel: "\(name): \(pctText), resets in \(humanReset(window.resetsAt))")
 }
+
+/// Compact hourly usage chart. Values are normalized to the busiest hour so
+/// providers with different units can still be viewed together as activity.
+final class HourlyUsageChartView: NSView {
+    private let usage: HourlyUsage
+
+    init(usage: HourlyUsage) {
+        self.usage = usage
+        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 132))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(usage.peakHour.map { "Peak usage at \($0):00" } ?? "No usage recorded today")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let plot = bounds.insetBy(dx: MenuMetrics.inset, dy: 12)
+        let chart = NSRect(x: plot.minX, y: plot.minY + 10, width: plot.width, height: plot.height - 22)
+        let maxValue = CGFloat(max(1, usage.values.max() ?? 0))
+
+        NSColor.quaternaryLabelColor.setStroke()
+        for fraction in [0.0, 0.5, 1.0] {
+            let y = chart.minY + chart.height * CGFloat(fraction)
+            let grid = NSBezierPath()
+            grid.move(to: NSPoint(x: chart.minX, y: y))
+            grid.line(to: NSPoint(x: chart.maxX, y: y))
+            grid.lineWidth = 0.5
+            grid.stroke()
+        }
+
+        guard usage.total > 0 else {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+            ("No usage recorded today" as NSString).draw(
+                in: NSRect(x: chart.minX, y: chart.midY - 8, width: chart.width, height: 16),
+                withAttributes: attrs)
+            return
+        }
+
+        let step = chart.width / 23
+        func point(_ index: Int) -> NSPoint {
+            let value = CGFloat(usage.values[index]) / maxValue
+            return NSPoint(x: chart.minX + CGFloat(index) * step, y: chart.minY + chart.height * value)
+        }
+
+        let fill = NSBezierPath()
+        fill.move(to: NSPoint(x: chart.minX, y: chart.minY))
+        fill.line(to: point(0))
+        for index in 1..<24 { fill.line(to: point(index)) }
+        fill.line(to: NSPoint(x: chart.maxX, y: chart.minY))
+        fill.close()
+        NSColor.systemBlue.withAlphaComponent(0.12).setFill()
+        fill.fill()
+
+        let line = NSBezierPath()
+        line.move(to: point(0))
+        for index in 1..<24 { line.line(to: point(index)) }
+        line.lineWidth = 2
+        NSColor.systemBlue.setStroke()
+        line.stroke()
+
+        if let peak = usage.peakHour {
+            let dot = NSBezierPath(ovalIn: NSRect(x: point(peak).x - 3, y: point(peak).y - 3, width: 6, height: 6))
+            NSColor.systemBlue.setFill()
+            dot.fill()
+        }
+
+        for index in [0, 6, 12, 18, 23] {
+            let text = label(String(format: "%02d", index), font: .monospacedDigitSystemFont(ofSize: 9, weight: .regular), color: .secondaryLabelColor, alignment: .center)
+            text.frame = NSRect(x: point(index).x - 12, y: chart.minY - 15, width: 24, height: 12)
+            text.draw(text.bounds)
+        }
+    }
+}
+
+func hourlyUsageChartItem(_ usage: HourlyUsage) -> NSMenuItem {
+    let view = HourlyUsageChartView(usage: usage)
+    let item = NSMenuItem()
+    item.view = view
+    item.isEnabled = false
+    return item
+}

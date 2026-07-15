@@ -2,6 +2,17 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add a daily Analytics section with an hourly line chart and peak activity
+  hour.
+- Show Antigravity quota remaining for the 5-hour and weekly windows when
+  quota data is available.
+- Animate the Antigravity logo in the menu bar while an AI task is running.
+- Fall back to Antigravity prompt counts when quota data is unavailable.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added

@@ -46,6 +46,19 @@ enum BrandIcons {
         }
     }
 
+    static func rotated(_ base: NSImage, angle: CGFloat) -> NSImage {
+        NSImage(size: NSSize(width: 24, height: 24), flipped: false) { rect in
+            NSGraphicsContext.current?.saveGraphicsState()
+            defer { NSGraphicsContext.current?.restoreGraphicsState() }
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            NSAffineTransform(translationByX: center.x, byY: center.y).concat()
+            NSAffineTransform(rotationByDegrees: angle * 180 / .pi).concat()
+            NSAffineTransform(translationByX: -center.x, byY: -center.y).concat()
+            base.draw(in: rect)
+            return true
+        }
+    }
+
     /// The glyph as an inline text attachment, vertically centered on `font`'s
     /// cap height — used to compose the status-bar title.
     static func attachment(_ base: NSImage, font: NSFont, color: NSColor) -> NSAttributedString {

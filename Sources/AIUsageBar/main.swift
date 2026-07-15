@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private var statusItem: NSStatusItem!
     private var timer: Timer?
+    private var animationTimer: Timer?
+    private var animationPhase: CGFloat = 0
     private let refreshInterval: TimeInterval = 60
     // Last successful Claude limits, reused between limit polls and when a
     // poll is rate-limited (429) so the display holds steady. Persisted to
@@ -72,6 +74,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+
+        let animation = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            guard let self, self.lastSnapshot?.antigravity?.isWorking == true else { return }
+            self.animationPhase += 0.08
+            self.updateStatusBarTitle(self.lastSnapshot!)
+        }
+        RunLoop.main.add(animation, forMode: .common)
+        animationTimer = animation
 
         NotificationCenter.default.addObserver(
             forName: .usageSettingsChanged, object: nil, queue: .main
@@ -208,42 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Rendered attributed: real brand glyphs, monospaced digits so the
         // title width stays steady, and a segment turns red when a limit runs
         // low.
-        let warnBelow = AppSettings.shared.warnBelowRemaining
-        var parts: [(icon: NSImage, text: String, warning: Bool)] = []
-        if snap.claude != nil {
-            let low = lowestClaudeRemaining(snap)
-            parts.append((BrandIcons.claude, claudeTitleValue(snap), (low ?? 100) < warnBelow))
-        }
-        if snap.codex != nil {
-            if let v = codexTitleValue(snap) {
-                parts.append((BrandIcons.codex, v.text, v.remaining < warnBelow))
-            } else if let x = snap.codex {
-                parts.append((BrandIcons.codex, formatTokens(x.totalTokens), false))
-            }
-        }
-        if let g = snap.antigravity {
-            parts.append((BrandIcons.gemini, "\(g.totalPrompts)P", false))
-        }
-        if let button = statusItem.button {
-            let font = NSFont.monospacedDigitSystemFont(
-                ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
-            let title = NSMutableAttributedString()
-            if parts.isEmpty {
-                title.append(NSAttributedString(string: "AI —", attributes: [.font: font]))
-            } else {
-                for part in parts {
-                    if title.length > 0 {
-                        title.append(NSAttributedString(string: "   ", attributes: [.font: font]))
-                    }
-                    let color: NSColor = part.warning ? .systemRed : .labelColor
-                    title.append(BrandIcons.attachment(part.icon, font: font, color: color))
-                    title.append(NSAttributedString(string: " " + part.text, attributes: [
-                        .font: font, .foregroundColor: color,
-                    ]))
-                }
-            }
-            button.attributedTitle = title
-        }
+        updateStatusBarTitle(snap)
 
         let menu = NSMenu()
 
@@ -283,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let g = snap.antigravity {
             menu.addItem(headerItem("Antigravity", icon: BrandIcons.gemini, iconTint: BrandIcons.geminiBrandColor))
+            addAntigravityLimits(menu, g)
             menu.addItem(caption("Today's activity"))
             menu.addItem(statPairItem("Prompts", "\(g.totalPrompts)", "Sessions", "\(g.sessionCount)"))
             let usd = Pricing.antigravityCostUSD(g)
@@ -295,6 +271,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(note("Looked for ~/.claude, ~/.codex and ~/.gemini"))
             menu.addItem(.separator())
         }
+
+        menu.addItem(caption("Analytics · Today"))
+        if let peak = snap.hourlyUsage.peakHour {
+            menu.addItem(note("Peak activity: \(String(format: "%02d:00", peak)) · \(formatTokens(snap.hourlyUsage.values[peak])) units"))
+        }
+        menu.addItem(hourlyUsageChartItem(snap.hourlyUsage))
+        menu.addItem(.separator())
 
         menu.addItem(refreshCountdownItem(
             updatedAt: snap.updatedAt, nextFire: nextRefreshAt, interval: refreshInterval))
@@ -322,6 +305,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    private func updateStatusBarTitle(_ snap: UsageSnapshot) {
+        let warnBelow = AppSettings.shared.warnBelowRemaining
+        var parts: [(icon: NSImage, text: String, warning: Bool)] = []
+        if snap.claude != nil { let low = lowestClaudeRemaining(snap); parts.append((BrandIcons.claude, claudeTitleValue(snap), (low ?? 100) < warnBelow)) }
+        if let x = snap.codex { if let v = codexTitleValue(snap) { parts.append((BrandIcons.codex, v.text, v.remaining < warnBelow)) } else { parts.append((BrandIcons.codex, formatTokens(x.totalTokens), false)) } }
+        if let g = snap.antigravity {
+            let windows = [g.fiveHour, g.weekly].compactMap { $0 }
+            let icon = g.isWorking ? BrandIcons.rotated(BrandIcons.gemini, angle: animationPhase) : BrandIcons.gemini
+            if let remaining = windows.map(\.remainingPercent).min() {
+                parts.append((icon, AppSettings.shared.displayMode.shortText(remaining: remaining), remaining < warnBelow))
+            } else {
+                parts.append((icon, "\(g.totalPrompts)P", false))
+            }
+        }
+        guard let button = statusItem.button else { return }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
+        let title = NSMutableAttributedString()
+        for part in parts { if title.length > 0 { title.append(NSAttributedString(string: "   ", attributes: [.font: font])) }; let color: NSColor = part.warning ? .systemRed : .labelColor; title.append(BrandIcons.attachment(part.icon, font: font, color: color)); title.append(NSAttributedString(string: " " + part.text, attributes: [.font: font, .foregroundColor: color])) }
+        button.attributedTitle = title.length == 0 ? NSAttributedString(string: "AI —", attributes: [.font: font]) : title
+    }
+
+    private func addAntigravityLimits(_ menu: NSMenu, _ usage: AntigravityUsage) {
+        if let fiveHour = usage.fiveHour { menu.addItem(limitRowItem(name: "5-hour", window: fiveHour)) }
+        if let weekly = usage.weekly { menu.addItem(limitRowItem(name: "Weekly", window: weekly)) }
+        if usage.fiveHour == nil && usage.weekly == nil { menu.addItem(note("No quota data yet — use Antigravity once to refresh it")) }
     }
 
     // MARK: - Limit rendering
