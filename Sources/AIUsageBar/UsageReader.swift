@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 enum UsageReader {
     static let claudeDir = FileManager.default.homeDirectoryForCurrentUser
@@ -327,8 +328,15 @@ enum UsageReader {
     private static func readAntigravityToday() -> AntigravityUsage {
         var usage = AntigravityUsage()
         let historyFile = antigravityDir.appendingPathComponent("history.jsonl")
-        usage.fiveHour = readAntigravityLimit(shortWindow: true)
-        usage.weekly = readAntigravityLimit(shortWindow: false)
+        let cachedFiveHour = readAntigravityLimit(shortWindow: true)
+        let cachedWeekly = readAntigravityLimit(shortWindow: false)
+        let live = fetchAntigravityLimits()
+        usage.fiveHour = live?.fiveHour ?? cachedFiveHour
+        usage.weekly = live?.weekly ?? cachedWeekly
+        usage.groups = live?.groups ?? []
+        usage.accountEmail = live?.accountEmail
+        usage.planName = live?.planName
+        usage.weeklyHistory = recordWeeklyHistory(weekly: usage.weekly)
         guard FileManager.default.fileExists(atPath: historyFile.path) else {
             usage.isWorking = antigravityIsWorking()
             return usage
@@ -350,6 +358,320 @@ enum UsageReader {
         usage.sessionCount = uniqueSessions.count
         usage.isWorking = antigravityIsWorking()
         return usage
+    }
+
+    /// Query Antigravity's loopback language server. The server uses a
+    /// self-signed certificate and requires the CSRF token passed to its
+    /// process, so this stays strictly local and never reads OAuth credentials.
+    private struct AntigravityLiveData {
+        var fiveHour: LimitWindow?
+        var weekly: LimitWindow?
+        var groups: [AntigravityQuotaGroup] = []
+        var accountEmail: String?
+        var planName: String?
+    }
+
+    private static func fetchAntigravityLimits() -> AntigravityLiveData? {
+        var cloud: AntigravityLiveData?
+        guard let servers = antigravityServers() else {
+            return fetchAntigravityQuotaSummary()
+        }
+        let path = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+        for server in servers {
+            for scheme in ["https", "http"] {
+                guard let url = URL(string: "\(scheme)://127.0.0.1:\(server.port)\(path)") else { continue }
+                var request = URLRequest(url: url, timeoutInterval: 3)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(server.csrf, forHTTPHeaderField: "x-codeium-csrf-token")
+                request.httpBody = Data("{}".utf8)
+                guard let data = localRequest(request, allowSelfSigned: scheme == "https"),
+                      let object = try? JSONSerialization.jsonObject(with: data)
+                else { continue }
+
+                let candidates = quotaCandidates(in: object)
+                guard !candidates.isEmpty else { continue }
+                var fiveHour: LimitWindow?
+                var weekly: LimitWindow?
+                for candidate in candidates {
+                    let until = candidate.reset.timeIntervalSinceNow
+                    let window = LimitWindow(
+                        usedPercent: max(0, min(100, (1 - candidate.remaining) * 100)),
+                        resetsAt: candidate.reset)
+                    if until > 0 && until <= 12 * 3600 {
+                        if fiveHour == nil || window.remainingPercent < fiveHour!.remainingPercent { fiveHour = window }
+                    } else if until > 12 * 3600 {
+                        if weekly == nil || window.remainingPercent < weekly!.remainingPercent { weekly = window }
+                    }
+                }
+                cloud = AntigravityLiveData(
+                    fiveHour: fiveHour,
+                    weekly: weekly,
+                    accountEmail: firstString(in: object, keys: ["email", "emailAddress"]),
+                    planName: firstString(in: object, keys: ["planName", "tierName", "paidTier"]))
+                break
+            }
+        }
+        let summary = fetchAntigravityQuotaSummary()
+        guard var cloud, let summary else { return cloud ?? summary }
+        cloud.fiveHour = cloud.fiveHour ?? summary.fiveHour
+        cloud.weekly = cloud.weekly ?? summary.weekly
+        cloud.groups = summary.groups
+        cloud.accountEmail = cloud.accountEmail ?? summary.accountEmail
+        cloud.planName = cloud.planName ?? summary.planName
+        return cloud
+    }
+
+    /// The local language server exposes model/5-hour quota, while the weekly
+    /// account bucket is returned by Google's quota-summary endpoint. The CLI
+    /// stores the OAuth credential in the macOS Keychain under service
+    /// `gemini`, account `antigravity`; read it without persisting or logging
+    /// the token.
+    private static func fetchAntigravityQuotaSummary() -> AntigravityLiveData? {
+        guard let token = antigravityAccessToken() else {
+            appLog("antigravity: weekly quota skipped — keychain token unavailable")
+            return nil
+        }
+        let base = "https://daily-cloudcode-pa.googleapis.com"
+        guard let loadURL = URL(string: base + "/v1internal:loadCodeAssist") else { return nil }
+        var load = URLRequest(url: loadURL, timeoutInterval: 5)
+        load.httpMethod = "POST"
+        load.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        load.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        load.setValue("antigravity/cli", forHTTPHeaderField: "User-Agent")
+        load.httpBody = Data(#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#.utf8)
+        guard let loadData = localRequest(load, allowSelfSigned: false),
+              let loadObject = try? JSONSerialization.jsonObject(with: loadData),
+              let project = jsonString(in: loadObject, key: "cloudaicompanionProject")
+        else {
+            appLog("antigravity: weekly quota skipped — loadCodeAssist failed")
+            return nil
+        }
+
+        guard let summaryURL = URL(string: base + "/v1internal:retrieveUserQuotaSummary") else { return nil }
+        var summary = URLRequest(url: summaryURL, timeoutInterval: 5)
+        summary.httpMethod = "POST"
+        summary.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        summary.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        summary.setValue("antigravity/cli", forHTTPHeaderField: "User-Agent")
+        let body = ["project": project]
+        summary.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let summaryData = localRequest(summary, allowSelfSigned: false),
+              let object = try? JSONSerialization.jsonObject(with: summaryData)
+        else {
+            appLog("antigravity: weekly quota skipped — retrieveUserQuotaSummary failed")
+            return nil
+        }
+
+        var fiveHour: LimitWindow?
+        var weekly: LimitWindow?
+        for candidate in quotaCandidates(in: object) {
+            let until = candidate.reset.timeIntervalSinceNow
+            let window = LimitWindow(
+                usedPercent: max(0, min(100, (1 - candidate.remaining) * 100)),
+                resetsAt: candidate.reset)
+            if until > 0 && until <= 12 * 3600 {
+                if fiveHour == nil || window.remainingPercent < fiveHour!.remainingPercent { fiveHour = window }
+            } else if until > 12 * 3600 {
+                if weekly == nil || window.remainingPercent < weekly!.remainingPercent { weekly = window }
+            }
+        }
+        let groups = quotaGroups(in: object)
+        appLog("antigravity: quota summary parsed — 5h=\(fiveHour != nil) weekly=\(weekly != nil)")
+        return AntigravityLiveData(
+            fiveHour: fiveHour,
+            weekly: weekly,
+            groups: groups,
+            accountEmail: firstString(in: loadObject, keys: ["email", "emailAddress"]),
+            planName: firstString(in: loadObject, keys: ["planName", "tierName", "paidTier"]))
+    }
+
+    private static func quotaGroups(in value: Any) -> [AntigravityQuotaGroup] {
+        guard let root = value as? [String: Any],
+              let rawGroups = root["groups"] as? [[String: Any]] else { return [] }
+        return rawGroups.compactMap { group in
+            let name = group["displayName"] as? String ?? "Other models"
+            var models = group["models"] as? [String] ?? group["modelIds"] as? [String] ?? []
+            if models.isEmpty, let description = group["description"] as? String,
+               let separator = description.firstIndex(of: ":") {
+                models = description[description.index(after: separator)...]
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            var fiveHour: LimitWindow?
+            var weekly: LimitWindow?
+            for bucket in group["buckets"] as? [[String: Any]] ?? [] {
+                guard let fraction = number(in: bucket, key: "remainingFraction"),
+                      let resetText = bucket["resetTime"] as? String,
+                      let reset = parseISO(resetText) else { continue }
+                let window = LimitWindow(usedPercent: max(0, min(100, (1 - fraction) * 100)), resetsAt: reset)
+                let kind = ((bucket["window"] as? String) ?? (bucket["bucketId"] as? String) ?? "").lowercased()
+                if kind.contains("week") { weekly = window }
+                else if kind.contains("5h") || kind.contains("hour") { fiveHour = window }
+            }
+            guard fiveHour != nil || weekly != nil else { return nil }
+            return AntigravityQuotaGroup(name: name, models: models, fiveHour: fiveHour, weekly: weekly)
+        }
+    }
+
+    private static func number(in object: [String: Any], key: String) -> Double? {
+        if let n = object[key] as? Double { return n }
+        if let n = object[key] as? NSNumber { return n.doubleValue }
+        return nil
+    }
+
+    private static func firstString(in value: Any, keys: [String]) -> String? {
+        for key in keys where jsonString(in: value, key: key) != nil {
+            return jsonString(in: value, key: key)
+        }
+        return nil
+    }
+
+    private static func recordWeeklyHistory(weekly: LimitWindow?) -> [AntigravityQuotaHistoryPoint] {
+        let key = "antigravityWeeklyQuotaHistory"
+        let defaults = UserDefaults.standard
+        let decoder = JSONDecoder()
+        var history = (try? decoder.decode([AntigravityQuotaHistoryPoint].self, from: defaults.data(forKey: key) ?? Data())) ?? []
+        if let weekly {
+            let point = AntigravityQuotaHistoryPoint(date: Date(), weeklyRemaining: weekly.remainingPercent)
+            if let index = history.indices.last, Date().timeIntervalSince(history[index].date) < 30 * 60 {
+                history[index] = point
+            } else {
+                history.append(point)
+            }
+            history = history.filter { $0.date > Date().addingTimeInterval(-14 * 24 * 3600) }
+            if let data = try? JSONEncoder().encode(history) { defaults.set(data, forKey: key) }
+        }
+        return history
+    }
+
+    private static func antigravityAccessToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "gemini",
+            kSecAttrAccount as String: "antigravity",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var wrapped: String?
+        var result: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data {
+            wrapped = String(data: data, encoding: .utf8)
+        }
+        if wrapped == nil {
+            wrapped = commandOutput("/usr/bin/security", [
+                "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"
+            ])?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let wrapped,
+              wrapped.hasPrefix("go-keyring-base64:"),
+              let decoded = Data(base64Encoded: String(wrapped.dropFirst("go-keyring-base64:".count))),
+              let root = try? JSONSerialization.jsonObject(with: decoded) as? [String: Any],
+              let token = root["token"] as? [String: Any],
+              let accessToken = token["access_token"] as? String,
+              !accessToken.isEmpty
+        else { return nil }
+        return accessToken
+    }
+
+    private static func jsonString(in value: Any, key: String) -> String? {
+        if let dict = value as? [String: Any] {
+            if let value = dict[key] as? String, !value.isEmpty { return value }
+            for child in dict.values {
+                if let found = jsonString(in: child, key: key) { return found }
+            }
+        } else if let array = value as? [Any] {
+            for child in array {
+                if let found = jsonString(in: child, key: key) { return found }
+            }
+        }
+        return nil
+    }
+
+    private struct AntigravityServer {
+        var port: Int
+        var csrf: String
+    }
+
+    private static func antigravityServers() -> [AntigravityServer]? {
+        guard let output = commandOutput("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"]) else { return nil }
+        var pid: String?
+        var ports: [(pid: String, port: Int)] = []
+        for line in output.split(separator: "\n") {
+            let value = String(line.dropFirst())
+            switch line.first {
+            case "p": pid = value
+            case "n":
+                if let port = Int(value.split(separator: ":").last ?? ""), let pid { ports.append((pid, port)) }
+            default: break
+            }
+        }
+        var servers: [AntigravityServer] = []
+        for entry in ports {
+            guard let args = commandOutput("/bin/ps", ["eww", "-p", entry.pid, "-o", "command="]) else { continue }
+            let tokenPatterns = [
+                #"GEMINI_CLI_IDE_AUTH_TOKEN=([^\s]+)"#,
+                #"(?:--)?csrf[_-]token(?:=|\s+)([^\s]+)"#
+            ]
+            guard let pattern = tokenPatterns.first(where: { args.range(of: $0, options: .regularExpression) != nil }),
+                  let match = args.range(of: pattern, options: .regularExpression)
+            else { continue }
+            var token = String(args[match])
+            if let equals = token.firstIndex(of: "=") { token = String(token[token.index(after: equals)...]) }
+            if !token.isEmpty { servers.append(AntigravityServer(port: entry.port, csrf: token)) }
+        }
+        return servers.isEmpty ? nil : servers
+    }
+
+    private static func commandOutput(_ path: String, _ arguments: [String]) -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        process.waitUntilExit()
+        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+    }
+
+    private final class LocalServerDelegate: NSObject, URLSessionDelegate {
+        func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+               challenge.protectionSpace.host == "127.0.0.1" {
+                completionHandler(.useCredential, URLCredential(trust: challenge.protectionSpace.serverTrust!))
+            } else {
+                completionHandler(.performDefaultHandling, nil)
+            }
+        }
+    }
+
+    private static func localRequest(_ request: URLRequest, allowSelfSigned: Bool) -> Data? {
+        let delegate = allowSelfSigned ? LocalServerDelegate() : nil
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Data?
+        session.dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) {
+                    result = data
+                    if request.url?.path.contains("retrieveUserQuotaSummary") == true {
+                        appLog("antigravity: quota summary HTTP 200 (\(data?.count ?? 0) bytes)")
+                    }
+                } else if request.url?.path.contains("retrieveUserQuotaSummary") == true {
+                    appLog("antigravity: quota summary HTTP \(http.statusCode)")
+                }
+            } else if request.url?.path.contains("retrieveUserQuotaSummary") == true {
+                appLog("antigravity: quota summary returned no HTTP response")
+            }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 4)
+        session.invalidateAndCancel()
+        return result
     }
 
     /// Antigravity stores quota responses in different cache locations across

@@ -8,10 +8,25 @@ All notable changes to AI Usage Bar are documented in this file.
 
 - Add a daily Analytics section with an hourly line chart and peak activity
   hour.
+- Query the running Antigravity language server over localhost for live
+  5-hour quota data, with cached-data fallback for older CLI versions.
+- Query Google's quota summary endpoint with the existing Antigravity macOS
+  Keychain session so the weekly quota is available without a second login.
 - Show Antigravity quota remaining for the 5-hour and weekly windows when
   quota data is available.
 - Animate the Antigravity logo in the menu bar while an AI task is running.
 - Fall back to Antigravity prompt counts when quota data is unavailable.
+- Group Antigravity quota display by model pool, including Gemini Models and
+  other groups returned by the quota summary.
+- Show the detected Antigravity account email and plan when supplied by the
+  local status service or cloud session.
+- Persist weekly quota samples locally and show a weekly remaining trend chart
+  after multiple refreshes.
+- Add a compact menu-bar display option with tighter provider spacing.
+- Add a setting to expand Antigravity quota groups and show their individual
+  model names.
+- Use full-width account and plan rows so Antigravity identity details are not
+  squeezed into a narrow right-aligned column.
 
 ## [0.4.0] - 2026-07-15
 

@@ -25,6 +25,8 @@ struct SettingsView: View {
                         Toggle("Weekly", isOn: $settings.showWeeklyInMenuBar)
                     }
                 }
+                Toggle("Compact provider display", isOn: $settings.compactMenuBar)
+                Toggle("Show Antigravity model details", isOn: $settings.showAntigravityModelDetails)
                 LabeledContent("THB per USD") {
                     TextField("33", value: $settings.thbPerUSD, format: .number.precision(.fractionLength(0...2)))
                         .frame(width: 80)

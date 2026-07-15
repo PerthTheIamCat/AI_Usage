@@ -35,7 +35,23 @@ struct AntigravityUsage {
     var sessionCount = 0
     var fiveHour: LimitWindow?
     var weekly: LimitWindow?
+    var groups: [AntigravityQuotaGroup] = []
+    var accountEmail: String?
+    var planName: String?
+    var weeklyHistory: [AntigravityQuotaHistoryPoint] = []
     var isWorking = false
+}
+
+struct AntigravityQuotaGroup {
+    var name: String
+    var models: [String] = []
+    var fiveHour: LimitWindow?
+    var weekly: LimitWindow?
+}
+
+struct AntigravityQuotaHistoryPoint: Codable {
+    var date: Date
+    var weeklyRemaining: Double
 }
 
 struct HourlyUsage {

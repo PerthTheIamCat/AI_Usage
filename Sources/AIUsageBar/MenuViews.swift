@@ -135,6 +135,20 @@ func statRowItem(_ name: String, _ value: String) -> NSMenuItem {
     return viewItem(view, accessibilityLabel: "\(name): \(value)")
 }
 
+/// Full-width value row for account identifiers and other long strings.
+func wideStatRowItem(_ name: String, _ value: String) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 21))
+    let labelWidth: CGFloat = 72
+    let l = label(name, font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
+    l.frame = NSRect(x: MenuMetrics.inset, y: 2, width: labelWidth, height: 17)
+    let v = label(value, font: .systemFont(ofSize: 12), color: .labelColor)
+    v.frame = NSRect(x: MenuMetrics.inset + labelWidth + 8, y: 2,
+                     width: MenuMetrics.contentWidth - labelWidth - 8, height: 17)
+    view.addSubview(l)
+    view.addSubview(v)
+    return viewItem(view, accessibilityLabel: "\(name): \(value)")
+}
+
 /// "Updated 20:10" row with a live countdown ring to the next refresh.
 /// The ring drains clockwise and the label counts down in seconds; the timer
 /// runs in .common mode so it keeps ticking while the menu is open.
@@ -339,6 +353,66 @@ final class HourlyUsageChartView: NSView {
 
 func hourlyUsageChartItem(_ usage: HourlyUsage) -> NSMenuItem {
     let view = HourlyUsageChartView(usage: usage)
+    let item = NSMenuItem()
+    item.view = view
+    item.isEnabled = false
+    return item
+}
+
+final class WeeklyQuotaHistoryChartView: NSView {
+    private let points: [AntigravityQuotaHistoryPoint]
+
+    init(points: [AntigravityQuotaHistoryPoint]) {
+        self.points = points
+        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 112))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel("Weekly quota history")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let chart = bounds.insetBy(dx: MenuMetrics.inset, dy: 18)
+        let maxValue = CGFloat(max(100, points.map(\.weeklyRemaining).max() ?? 100))
+        let minValue = CGFloat(min(0, points.map(\.weeklyRemaining).min() ?? 0))
+        let range = max(1, maxValue - minValue)
+        let step = chart.width / CGFloat(max(1, points.count - 1))
+        func point(_ index: Int) -> NSPoint {
+            let value = CGFloat(points[index].weeklyRemaining)
+            return NSPoint(x: chart.minX + CGFloat(index) * step,
+                           y: chart.minY + chart.height * (value - minValue) / range)
+        }
+
+        NSColor.quaternaryLabelColor.setStroke()
+        let grid = NSBezierPath()
+        grid.move(to: NSPoint(x: chart.minX, y: chart.minY + chart.height * 0.5))
+        grid.line(to: NSPoint(x: chart.maxX, y: chart.minY + chart.height * 0.5))
+        grid.lineWidth = 0.5
+        grid.stroke()
+
+        let line = NSBezierPath()
+        line.move(to: point(0))
+        for index in 1..<points.count { line.line(to: point(index)) }
+        line.lineWidth = 2
+        NSColor.systemGreen.setStroke()
+        line.stroke()
+
+        for index in stride(from: 0, to: points.count, by: max(1, points.count / 8)) {
+            let dot = NSBezierPath(ovalIn: NSRect(x: point(index).x - 2.5, y: point(index).y - 2.5, width: 5, height: 5))
+            NSColor.systemGreen.setFill()
+            dot.fill()
+        }
+        let latest = Int((points.last?.weeklyRemaining ?? 0).rounded())
+        let text = label("now \(latest)% left · \(points.count) samples", font: .monospacedDigitSystemFont(ofSize: 9, weight: .regular), color: .secondaryLabelColor, alignment: .right)
+        text.frame = NSRect(x: chart.minX, y: 1, width: chart.width, height: 13)
+        text.draw(text.bounds)
+    }
+}
+
+func weeklyQuotaHistoryChartItem(_ points: [AntigravityQuotaHistoryPoint]) -> NSMenuItem {
+    let view = WeeklyQuotaHistoryChartView(points: points)
     let item = NSMenuItem()
     item.view = view
     item.isEnabled = false

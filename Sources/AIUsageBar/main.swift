@@ -259,10 +259,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let g = snap.antigravity {
             menu.addItem(headerItem("Antigravity", icon: BrandIcons.gemini, iconTint: BrandIcons.geminiBrandColor))
             addAntigravityLimits(menu, g)
+            if let email = g.accountEmail { menu.addItem(wideRow("Account", email)) }
+            if let plan = g.planName { menu.addItem(wideRow("Plan", plan)) }
             menu.addItem(caption("Today's activity"))
             menu.addItem(statPairItem("Prompts", "\(g.totalPrompts)", "Sessions", "\(g.sessionCount)"))
             let usd = Pricing.antigravityCostUSD(g)
             menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
+            menu.addItem(caption("Weekly history"))
+            if g.weeklyHistory.count >= 2 {
+                menu.addItem(weeklyQuotaHistoryChartItem(g.weeklyHistory))
+            } else {
+                menu.addItem(note("History will appear after a few quota refreshes"))
+            }
             menu.addItem(.separator())
         }
 
@@ -324,14 +332,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else { return }
         let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
         let title = NSMutableAttributedString()
-        for part in parts { if title.length > 0 { title.append(NSAttributedString(string: "   ", attributes: [.font: font])) }; let color: NSColor = part.warning ? .systemRed : .labelColor; title.append(BrandIcons.attachment(part.icon, font: font, color: color)); title.append(NSAttributedString(string: " " + part.text, attributes: [.font: font, .foregroundColor: color])) }
+        let separator = AppSettings.shared.compactMenuBar ? " " : "   "
+        for part in parts { if title.length > 0 { title.append(NSAttributedString(string: separator, attributes: [.font: font])) }; let color: NSColor = part.warning ? .systemRed : .labelColor; title.append(BrandIcons.attachment(part.icon, font: font, color: color)); title.append(NSAttributedString(string: " " + part.text, attributes: [.font: font, .foregroundColor: color])) }
         button.attributedTitle = title.length == 0 ? NSAttributedString(string: "AI —", attributes: [.font: font]) : title
     }
 
     private func addAntigravityLimits(_ menu: NSMenu, _ usage: AntigravityUsage) {
+        menu.addItem(caption("Limits"))
         if let fiveHour = usage.fiveHour { menu.addItem(limitRowItem(name: "5-hour", window: fiveHour)) }
         if let weekly = usage.weekly { menu.addItem(limitRowItem(name: "Weekly", window: weekly)) }
-        if usage.fiveHour == nil && usage.weekly == nil { menu.addItem(note("No quota data yet — use Antigravity once to refresh it")) }
+        if usage.fiveHour == nil && usage.weekly == nil {
+            menu.addItem(note("No quota data yet — start Antigravity and refresh"))
+        } else if usage.weekly == nil {
+            menu.addItem(note("Weekly quota is not exposed by the local Antigravity server"))
+        }
+        if !usage.groups.isEmpty {
+            menu.addItem(caption("Model groups"))
+            for group in usage.groups {
+                if let fiveHour = group.fiveHour { menu.addItem(limitRowItem(name: "\(group.name) · 5-hour", window: fiveHour)) }
+                if let weekly = group.weekly { menu.addItem(limitRowItem(name: "\(group.name) · Weekly", window: weekly)) }
+                if AppSettings.shared.showAntigravityModelDetails {
+                    for model in group.models { menu.addItem(note("  · \(model)")) }
+                }
+            }
+        }
     }
 
     // MARK: - Limit rendering
@@ -420,6 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func caption(_ title: String) -> NSMenuItem { captionItem(title) }
     private func note(_ text: String) -> NSMenuItem { noteItem(text) }
     private func row(_ label: String, _ value: String) -> NSMenuItem { statRowItem(label, value) }
+    private func wideRow(_ label: String, _ value: String) -> NSMenuItem { wideStatRowItem(label, value) }
 }
 
 if CommandLine.arguments.contains("--dump") {
@@ -454,6 +479,16 @@ if CommandLine.arguments.contains("--dump") {
             return "\(n)=\(Int(x.remainingPercent))% left (resets \(humanReset(x.resetsAt)))"
         }
         print("Codex limits (as of \(humanAgo(l.asOf))): \(w("weekly", l.secondary))")
+    }
+    if let g = snap.antigravity {
+        print("Antigravity: prompts=\(g.totalPrompts) sessions=\(g.sessionCount) working=\(g.isWorking)")
+        func w(_ n: String, _ x: LimitWindow?) -> String {
+            guard let x = x else { return "\(n)=n/a" }
+            return "\(n)=\(Int(x.remainingPercent))% left (resets \(humanReset(x.resetsAt)))"
+        }
+        print("Antigravity limits: \(w("5h", g.fiveHour))  \(w("weekly", g.weekly))")
+    } else {
+        print("Antigravity: not detected")
     }
     exit(0)
 }

@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ai-usage-bar}",
+            "name": "Debug AIUsageBar",
+            "target": "AIUsageBar",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AIUsageBar"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ai-usage-bar}",
+            "name": "Release AIUsageBar",
+            "target": "AIUsageBar",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AIUsageBar"
+        }
+    ]
+}

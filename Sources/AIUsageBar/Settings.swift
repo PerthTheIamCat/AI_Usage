@@ -40,6 +40,8 @@ final class AppSettings: ObservableObject {
         static let showFiveHourInMenuBar = "showFiveHourInMenuBar"
         static let showWeeklyInMenuBar = "showWeeklyInMenuBar"
         static let thbPerUSD = "thbPerUSD"
+        static let compactMenuBar = "compactMenuBar"
+        static let showAntigravityModelDetails = "showAntigravityModelDetails"
     }
 
     @Published var displayMode: UsageDisplayMode {
@@ -82,6 +84,20 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var compactMenuBar: Bool {
+        didSet {
+            UserDefaults.standard.set(compactMenuBar, forKey: Keys.compactMenuBar)
+            NotificationCenter.default.post(name: .usageSettingsChanged, object: nil)
+        }
+    }
+
+    @Published var showAntigravityModelDetails: Bool {
+        didSet {
+            UserDefaults.standard.set(showAntigravityModelDetails, forKey: Keys.showAntigravityModelDetails)
+            NotificationCenter.default.post(name: .usageSettingsChanged, object: nil)
+        }
+    }
+
     private init() {
         let d = UserDefaults.standard
         displayMode = UsageDisplayMode(rawValue: d.string(forKey: Keys.displayMode) ?? "") ?? .remaining
@@ -91,5 +107,7 @@ final class AppSettings: ObservableObject {
         showWeeklyInMenuBar = d.object(forKey: Keys.showWeeklyInMenuBar) as? Bool ?? true
         let rate = d.double(forKey: Keys.thbPerUSD)
         thbPerUSD = rate > 0 ? rate : 33
+        compactMenuBar = d.object(forKey: Keys.compactMenuBar) as? Bool ?? false
+        showAntigravityModelDetails = d.object(forKey: Keys.showAntigravityModelDetails) as? Bool ?? false
     }
 }
