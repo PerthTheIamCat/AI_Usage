@@ -2,6 +2,14 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Custom app icon (`Resources/AppIcon.icns`) — purple gradient squircle with
+  a usage-meter capsule and a sparkle accent. Previously the app had no icon
+  at all and fell back to the generic system placeholder.
+
 ## [0.5.0] - 2026-07-24
 
 ### Added

@@ -25,9 +25,10 @@ if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
   exit 1
 fi
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 cp .build/release/AIUsageBar "$APP/Contents/MacOS/AIUsageBar"
 cp -R "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # SwiftPM links Sparkle through @rpath but does not add the app-bundle framework
 # location. Add it before signing so launchd and Finder can load the copy above.
 install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/AIUsageBar"
@@ -45,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>com.perth.aiusagebar</string>
     <key>CFBundleName</key><string>AI Usage Bar</string>
     <key>CFBundleExecutable</key><string>AIUsageBar</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
