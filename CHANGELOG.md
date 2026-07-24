@@ -2,7 +2,7 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
-## [Unreleased]
+## [0.5.1] - 2026-07-24
 
 ### Added
 
