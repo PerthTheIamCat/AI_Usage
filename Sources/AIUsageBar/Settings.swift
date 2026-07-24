@@ -73,6 +73,7 @@ final class AppSettings: ObservableObject {
         static let showModelBreakdown = "showModelBreakdown"
         static let showAvgPerSession = "showAvgPerSession"
         static let showPeriodCost = "showPeriodCost"
+        static let showSkillsUsed = "showSkillsUsed"
     }
 
     @Published var displayMode: UsageDisplayMode {
@@ -184,6 +185,14 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// Claude Code `Skill` invocation counts for today (see `ClaudeUsage.skillCounts`).
+    @Published var showSkillsUsed: Bool {
+        didSet {
+            UserDefaults.standard.set(showSkillsUsed, forKey: Keys.showSkillsUsed)
+            NotificationCenter.default.post(name: .usageSettingsChanged, object: nil)
+        }
+    }
+
     private init() {
         let d = UserDefaults.standard
         displayMode = UsageDisplayMode(rawValue: d.string(forKey: Keys.displayMode) ?? "") ?? .remaining
@@ -205,5 +214,6 @@ final class AppSettings: ObservableObject {
         showModelBreakdown = d.object(forKey: Keys.showModelBreakdown) as? Bool ?? true
         showAvgPerSession = d.object(forKey: Keys.showAvgPerSession) as? Bool ?? true
         showPeriodCost = d.object(forKey: Keys.showPeriodCost) as? Bool ?? true
+        showSkillsUsed = d.object(forKey: Keys.showSkillsUsed) as? Bool ?? true
     }
 }

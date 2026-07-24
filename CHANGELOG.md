@@ -2,6 +2,16 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
+## [0.5.2] - 2026-07-24
+
+### Added
+
+- "Skills used today" — tallies Claude Code `Skill` tool invocations
+  (e.g. `/commit`, `/graphify`) from today's transcripts, shown in the
+  Claude Code dropdown section and toggleable in Settings › General.
+  Reuses the existing token-usage dedup logic so re-streamed log entries
+  don't double-count.
+
 ## [0.5.1] - 2026-07-24
 
 ### Added

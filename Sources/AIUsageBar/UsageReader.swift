@@ -199,7 +199,7 @@ enum UsageReader {
         var usage = ClaudeUsage()
         // Dedupe streamed/rewritten entries: same request may appear multiple
         // times; keep the last occurrence per key.
-        var perKey: [String: (input: Int, output: Int, cacheW: Int, cacheR: Int, model: String?, ts: String)] = [:]
+        var perKey: [String: (input: Int, output: Int, cacheW: Int, cacheR: Int, model: String?, ts: String, skills: [String])] = [:]
         var sessions = Set<String>()
 
         for file in files {
@@ -225,7 +225,8 @@ enum UsageReader {
                     cacheW: u["cache_creation_input_tokens"] as? Int ?? 0,
                     cacheR: u["cache_read_input_tokens"] as? Int ?? 0,
                     model: message["model"] as? String,
-                    ts: ts
+                    ts: ts,
+                    skills: skillInvocations(in: message)
                 )
             }
             if fileMatched { sessions.insert(file.path) }
@@ -244,6 +245,7 @@ enum UsageReader {
             m.cacheWrite += e.cacheW
             m.cacheRead += e.cacheR
             usage.perModel[model] = m
+            for skill in e.skills { usage.skillCounts[skill, default: 0] += 1 }
             if e.ts > latestTS, let m = e.model {
                 latestTS = e.ts
                 usage.lastModel = m
@@ -251,6 +253,21 @@ enum UsageReader {
         }
         usage.sessionCount = sessions.count
         return usage
+    }
+
+    /// Names of any Claude Code `Skill` tool calls in one assistant message's
+    /// content array — e.g. `[{"type":"tool_use","name":"Skill","input":{"skill":"graphify"}}]`.
+    private static func skillInvocations(in message: [String: Any]) -> [String] {
+        guard let content = message["content"] as? [Any] else { return [] }
+        return content.compactMap { item in
+            guard let block = item as? [String: Any],
+                  block["type"] as? String == "tool_use",
+                  block["name"] as? String == "Skill",
+                  let input = block["input"] as? [String: Any],
+                  let skill = input["skill"] as? String
+            else { return nil }
+            return skill
+        }
     }
 
     /// Newest account-wide rate-limit snapshot Codex wrote to any recent

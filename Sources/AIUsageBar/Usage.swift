@@ -17,6 +17,8 @@ struct ClaudeUsage {
     var lastModel: String?
     /// Per-model breakdown of the same totals; keyed by model ID.
     var perModel: [String: ModelTokens] = [:]
+    /// Invocation counts for Claude Code `Skill` tool calls, keyed by skill name.
+    var skillCounts: [String: Int] = [:]
 
     var total: Int { inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens }
 }

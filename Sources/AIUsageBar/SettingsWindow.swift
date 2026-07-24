@@ -41,6 +41,7 @@ private struct GeneralTab: View {
                 Toggle("Per-model breakdown", isOn: $settings.showModelBreakdown)
                 Toggle("Avg/session", isOn: $settings.showAvgPerSession)
                 Toggle("7-day / 30-day cost", isOn: $settings.showPeriodCost)
+                Toggle("Skills used today", isOn: $settings.showSkillsUsed)
             } header: {
                 Text("Dropdown content")
             } footer: {

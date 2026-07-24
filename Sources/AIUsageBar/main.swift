@@ -329,6 +329,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 menu.addItem(row(m.model, "\(formatTokens(total)) · \(formatUSD(m.costUSD))"))
             }
         }
+        if s.showSkillsUsed && !c.skillCounts.isEmpty {
+            menu.addItem(caption("Skills used today"))
+            for (skill, count) in c.skillCounts.sorted(by: { $0.value > $1.value }) {
+                menu.addItem(row(skill, "\(count)×"))
+            }
+        }
         if let m = c.lastModel { menu.addItem(row("Last model", m)) }
         let usd = Pricing.claudeCostUSD(c)
         if s.showAvgPerSession {
@@ -517,6 +523,10 @@ if CommandLine.arguments.contains("--dump") {
     let snap = UsageReader.snapshot()
     if let c = snap.claude {
         print("Claude: total=\(formatTokens(c.total)) in=\(c.inputTokens) out=\(c.outputTokens) cacheW=\(c.cacheCreationTokens) cacheR=\(c.cacheReadTokens) sessions=\(c.sessionCount) model=\(c.lastModel ?? "-")")
+        if !c.skillCounts.isEmpty {
+            let skills = c.skillCounts.sorted { $0.value > $1.value }.map { "\($0.key)×\($0.value)" }.joined(separator: ", ")
+            print("Claude skills today: \(skills)")
+        }
     } else {
         print("Claude: not detected")
     }
