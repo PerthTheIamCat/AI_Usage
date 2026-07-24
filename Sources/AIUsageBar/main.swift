@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,10 +11,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userDriverDelegate: nil
     )
     private var statusItem: NSStatusItem!
+    private var popover: NSPopover?
+    private let refreshInterval: TimeInterval = 60
+    private lazy var viewModel = UsageViewModel(refreshInterval: refreshInterval)
     private var timer: Timer?
     private var animationTimer: Timer?
     private var animationPhase: CGFloat = 0
-    private let refreshInterval: TimeInterval = 60
     // Last successful Claude limits, reused between limit polls and when a
     // poll is rate-limited (429) so the display holds steady. Persisted to
     // UserDefaults so a relaunch still has data while the first fetch runs
@@ -70,11 +73,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restoreLastGoodClaude()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "AI …"
-        statusItem.menu = NSMenu()
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(statusItemClicked)
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         refresh()
-        // .common mode so the periodic refresh keeps firing while the menu is
-        // open (menu tracking suspends default-mode timers).
+        // .common mode so the periodic refresh keeps firing while the popover
+        // is open (modal-ish tracking loops otherwise suspend default-mode timers).
         let t = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -97,11 +102,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func statusItemClicked() {
+        guard let button = statusItem.button else { return }
+        if let popover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        let pop = popover ?? makePopover()
+        popover = pop
+        NSApp.activate(ignoringOtherApps: true)
+        pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func makePopover() -> NSPopover {
+        let content = PopoverContentView(
+            viewModel: viewModel,
+            appVersion: Self.appVersion,
+            onRefresh: { [weak self] in self?.refreshClicked() },
+            onCheckForUpdates: { [weak self] in self?.updaterController.checkForUpdates(nil) },
+            onSettings: { [weak self] in self?.settingsClicked() },
+            onQuit: { [weak self] in self?.quitClicked() }
+        )
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.contentViewController = NSHostingController(rootView: content)
+        return pop
+    }
+
     @objc private func refreshClicked() {
-        manualRefresh = true   // force a limits fetch on explicit ⌘R
+        manualRefresh = true   // force a limits fetch on explicit Refresh Now
         refresh()
     }
-    @objc private func settingsClicked() { SettingsWindowController.shared.show() }
+    @objc private func settingsClicked() {
+        popover?.performClose(nil)
+        SettingsWindowController.shared.show()
+    }
     @objc private func quitClicked() { NSApp.terminate(nil) }
 
     /// Cheap Date compare on every tick; the actual network call only fires
@@ -212,12 +247,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appLog("claude: restored cached limits from \(humanAgo(stored.fetchedAt))")
     }
 
+    /// Cache good readings; reuse the last good one when this tick skipped the
+    /// fetch (nil) or failed, so the display holds steady. A failure is still
+    /// surfaced as a status note so the user knows what happened. Feeds the
+    /// popover's view model — the popover itself just re-renders reactively.
     private func apply(_ snap: UsageSnapshot) {
         lastSnapshot = snap
         var snap = snap
-        // Cache good readings; reuse the last good one when this tick skipped
-        // the fetch (nil) or failed, so the display holds steady. A failure
-        // is still surfaced as a status note so the user knows what happened.
         var claudeAPIProblem: String?
         if let cl = snap.claudeLimits {
             switch cl.state {
@@ -249,144 +285,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // low.
         updateStatusBarTitle(snap)
 
-        let menu = NSMenu()
-
-        for kind in AppSettings.shared.providerOrder {
-            switch kind {
-            case .claude: addClaudeSection(menu, snap, claudeAPIProblem)
-            case .codex: addCodexSection(menu, snap)
-            case .antigravity: addAntigravitySection(menu, snap)
-            }
-        }
-
-        if snap.claude == nil && snap.codex == nil && snap.antigravity == nil {
-            menu.addItem(header("No AI CLI detected"))
-            menu.addItem(note("Looked for ~/.claude, ~/.codex and ~/.gemini"))
-            menu.addItem(.separator())
-        }
-
-        menu.addItem(caption("Analytics · Today"))
-        if let peak = snap.hourlyUsage.peakHour {
-            menu.addItem(note("Peak activity: \(String(format: "%02d:00", peak)) · \(formatTokens(snap.hourlyUsage.values[peak])) units"))
-        }
-        menu.addItem(hourlyUsageChartItem(snap.hourlyUsage))
-        menu.addItem(.separator())
-
-        menu.addItem(refreshCountdownItem(
-            updatedAt: snap.updatedAt, nextFire: nextRefreshAt, interval: refreshInterval))
-        menu.addItem(note("AI Usage Bar v\(Self.appVersion)"))
-
-        let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshClicked), keyEquivalent: "r")
-        refreshItem.target = self
-        menu.addItem(refreshItem)
-
-        let checkForUpdatesItem = NSMenuItem(
-            title: "Check for Updates…",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
-            keyEquivalent: ""
-        )
-        checkForUpdatesItem.target = updaterController
-        menu.addItem(checkForUpdatesItem)
-
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(settingsClicked), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "Quit AI Usage Bar", action: #selector(quitClicked), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        viewModel.snapshot = snap
+        viewModel.claudeAPIProblem = claudeAPIProblem
+        viewModel.lastGoodClaudeFetchedAt = lastGoodClaude?.fetchedAt
+        viewModel.nextRefreshAt = nextRefreshAt
     }
 
-    // MARK: - Provider sections (order driven by AppSettings.providerOrder)
-
-    private func addClaudeSection(_ menu: NSMenu, _ snap: UsageSnapshot, _ claudeAPIProblem: String?) {
-        guard let c = snap.claude else { return }
-        menu.addItem(headerItem("Claude Code", icon: BrandIcons.claude, iconTint: BrandIcons.claudeBrandColor))
-        if let problem = claudeAPIProblem {
-            var text = "⚠︎ \(problem)"
-            if let goodAt = lastGoodClaude?.fetchedAt {
-                text += " · showing data from \(humanAgo(goodAt))"
-            }
-            menu.addItem(note(text))
-        }
-        addClaudeLimits(menu, snap.claudeLimits)
-        menu.addItem(caption("Today's tokens"))
-        menu.addItem(statPairItem("Total", formatTokens(c.total), "Sessions", "\(c.sessionCount)"))
-        menu.addItem(statPairItem("Input", formatTokens(c.inputTokens), "Output", formatTokens(c.outputTokens)))
-        menu.addItem(statPairItem("Cache write", formatTokens(c.cacheCreationTokens), "Cache read", formatTokens(c.cacheReadTokens)))
-        let s = AppSettings.shared
-        if s.showCacheHitRate { menu.addItem(row("Cache hit rate", "\(Int(Pricing.claudeCacheHitRatePercent(c).rounded()))%")) }
-        if s.showModelBreakdown && c.perModel.count > 1 {
-            menu.addItem(caption("By model"))
-            let models = c.perModel
-                .map { (model: $0.key, tokens: $0.value, costUSD: Pricing.claudeModelCostUSD($0.value, model: $0.key)) }
-                .sorted { $0.costUSD > $1.costUSD }
-            for m in models {
-                let total = m.tokens.input + m.tokens.output + m.tokens.cacheWrite + m.tokens.cacheRead
-                menu.addItem(row(m.model, "\(formatTokens(total)) · \(formatUSD(m.costUSD))"))
-            }
-        }
-        if s.showSkillsUsed && !c.skillCounts.isEmpty {
-            menu.addItem(caption("Skills used today"))
-            for (skill, count) in c.skillCounts.sorted(by: { $0.value > $1.value }) {
-                menu.addItem(row(skill, "\(count)×"))
-            }
-        }
-        if let m = c.lastModel { menu.addItem(row("Last model", m)) }
-        let usd = Pricing.claudeCostUSD(c)
-        if s.showAvgPerSession {
-            menu.addItem(row("Avg/session", "\(formatTokens(c.total / max(1, c.sessionCount))) · \(formatUSD(usd / Double(max(1, c.sessionCount))))"))
-        }
-        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.claudeUSD7, let d30 = pc.claudeUSD30 {
-            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
-        }
-        menu.addItem(.separator())
-    }
-
-    private func addCodexSection(_ menu: NSMenu, _ snap: UsageSnapshot) {
-        guard let x = snap.codex else { return }
-        var title = "Codex"
-        if let plan = snap.codexLimits?.planType { title += " (\(plan))" }
-        menu.addItem(headerItem(title, icon: BrandIcons.codex))
-        addCodexLimits(menu, snap.codexLimits)
-        menu.addItem(caption("Today's tokens"))
-        menu.addItem(statPairItem("Total", formatTokens(x.totalTokens), "Sessions", "\(x.sessionCount)"))
-        menu.addItem(statPairItem("Input", formatTokens(x.inputTokens), "Cached in", formatTokens(x.cachedInputTokens)))
-        menu.addItem(statPairItem("Output", formatTokens(x.outputTokens), "Reasoning", formatTokens(x.reasoningTokens)))
-        let s = AppSettings.shared
-        if s.showCacheHitRate { menu.addItem(row("Cache hit rate", "\(Int(Pricing.codexCacheHitRatePercent(x).rounded()))%")) }
-        let usd = Pricing.codexCostUSD(x)
-        if s.showAvgPerSession {
-            menu.addItem(row("Avg/session", "\(formatTokens(x.totalTokens / max(1, x.sessionCount))) · \(formatUSD(usd / Double(max(1, x.sessionCount))))"))
-        }
-        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.codexUSD7, let d30 = pc.codexUSD30 {
-            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
-        }
-        menu.addItem(.separator())
-    }
-
-    private func addAntigravitySection(_ menu: NSMenu, _ snap: UsageSnapshot) {
-        guard let g = snap.antigravity else { return }
-        menu.addItem(headerItem("Antigravity", icon: BrandIcons.gemini, iconTint: BrandIcons.geminiBrandColor))
-        addAntigravityLimits(menu, g)
-        menu.addItem(caption("Today's activity"))
-        menu.addItem(statPairItem("Prompts", "\(g.totalPrompts)", "Sessions", "\(g.sessionCount)"))
-        let usd = Pricing.antigravityCostUSD(g)
-        let s = AppSettings.shared
-        if s.showAvgPerSession {
-            menu.addItem(row("Avg/session", "\(g.totalPrompts / max(1, g.sessionCount))P · \(formatUSD(usd / Double(max(1, g.sessionCount))))"))
-        }
-        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.antigravityUSD7, let d30 = pc.antigravityUSD30 {
-            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
-        }
-        menu.addItem(.separator())
-    }
+    // MARK: - Status bar title (unrelated to the popover; unchanged)
 
     private func statusBarPart(for kind: ProviderKind, _ snap: UsageSnapshot) -> (icon: NSImage, text: String, warning: Bool)? {
         let warnBelow = AppSettings.shared.warnBelowRemaining
@@ -419,14 +324,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.attributedTitle = title.length == 0 ? NSAttributedString(string: "AI —", attributes: [.font: font]) : title
     }
 
-    private func addAntigravityLimits(_ menu: NSMenu, _ usage: AntigravityUsage) {
-        windowRows(menu, "5-hour", usage.fiveHour)
-        windowRows(menu, "Weekly", usage.weekly)
-        if usage.fiveHour == nil && usage.weekly == nil { menu.addItem(note("No quota data yet — use Antigravity once to refresh it")) }
-    }
-
-    // MARK: - Limit rendering
-
     private func claudeTitleValue(_ snap: UsageSnapshot) -> String {
         guard let l = snap.claudeLimits else { return "—" }
         switch l.state {
@@ -455,28 +352,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return values.min()
     }
 
-    private func addClaudeLimits(_ menu: NSMenu, _ limits: ClaudeLimits?) {
-        guard let l = limits else {
-            menu.addItem(note("Fetching limits…"))
-            return
-        }
-        switch l.state {
-        case .ok:
-            let s = AppSettings.shared
-            var shown = false
-            if s.showFiveHourInMenuBar { windowRows(menu, "5-hour", l.fiveHour); shown = true }
-            if s.showWeeklyInMenuBar { windowRows(menu, "Weekly", l.sevenDay); shown = true }
-            if !shown { menu.addItem(note("Both windows hidden — enable in Settings › Providers")) }
-        case .rateLimited, .error:
-            // Cause already shown by the ⚠︎ status note; nothing cached to draw.
-            menu.addItem(note("No limit data to show yet — retrying next refresh"))
-        case .stale:
-            menu.addItem(note("Login expired — run `claude` to sign in"))
-        case .notLoggedIn:
-            menu.addItem(note("Not logged in to Claude Code"))
-        }
-    }
-
     /// Codex has no live API here — the reading is whatever the last Codex
     /// session logged. Weekly window only; Codex retired its 5-hour window.
     /// Returns nil when even that is missing.
@@ -488,35 +363,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    private func addCodexLimits(_ menu: NSMenu, _ limits: CodexLimits?) {
-        guard let l = limits else {
-            menu.addItem(note("No limit data yet — run codex once"))
-            return
-        }
-        menu.addItem(caption("Limits · as of \(humanAgo(l.asOf))"))
-        windowRows(menu, "Weekly", l.secondary)
-    }
-
     private func isExpired(_ w: LimitWindow) -> Bool {
         if let r = w.resetsAt { return r <= Date() }
         return false
     }
-
-    private func windowRows(_ menu: NSMenu, _ name: String, _ w: LimitWindow?) {
-        guard let w = w else { return }
-        if isExpired(w) {
-            // Window already rolled over; the stored percent is meaningless now.
-            menu.addItem(note("\(name): window reset — reopen CLI for fresh reading"))
-            return
-        }
-        menu.addItem(limitRowItem(name: name, window: w))
-    }
-
-    // Thin wrappers over the MenuViews factories keep apply() readable.
-    private func header(_ title: String) -> NSMenuItem { headerItem(title) }
-    private func caption(_ title: String) -> NSMenuItem { captionItem(title) }
-    private func note(_ text: String) -> NSMenuItem { noteItem(text) }
-    private func row(_ label: String, _ value: String) -> NSMenuItem { statRowItem(label, value) }
 }
 
 if CommandLine.arguments.contains("--dump") {

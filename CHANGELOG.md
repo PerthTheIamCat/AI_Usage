@@ -2,6 +2,21 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
+## [0.6.0] - 2026-07-24
+
+### Changed
+
+- Dropdown redesigned from a single scrolling NSMenu into a popover with a
+  side tab bar — Claude Code / Codex / Antigravity / Analytics, one click
+  switches panes instead of scrolling past everything. A persistent footer
+  (refresh countdown, Refresh Now, Check for Updates, Settings, Quit) stays
+  visible regardless of which tab is selected. Refresh Now no longer closes
+  the window — data updates live in place.
+- All existing rows (limits, today's tokens, cache hit rate, per-model
+  breakdown, skills used, avg/session, 7-day/30-day cost, hourly chart)
+  carried over 1:1 into the new panes, still gated by the same Settings
+  toggles.
+
 ## [0.5.2] - 2026-07-24
 
 ### Added
