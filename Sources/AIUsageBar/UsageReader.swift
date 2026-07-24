@@ -11,7 +11,11 @@ enum UsageReader {
     /// - Parameter fetchClaudeLimits: when false, skips the Claude usage API
     ///   call (leaving `claudeLimits == nil`) so the caller can throttle that
     ///   endpoint independently of the cheap local token-count reads.
-    static func snapshot(fetchClaudeLimits: Bool = true) -> UsageSnapshot {
+    /// - Parameter includePeriodStats: when true, also computes the 7-/30-day
+    ///   cost aggregates (see `periodCosts()`). Off by default since it's
+    ///   meaningfully heavier than the today-only reads; the caller throttles
+    ///   it on its own slower cadence.
+    static func snapshot(fetchClaudeLimits: Bool = true, includePeriodStats: Bool = false) -> UsageSnapshot {
         let fm = FileManager.default
         var snap = UsageSnapshot()
         if fm.fileExists(atPath: claudeDir.path) {
@@ -26,6 +30,7 @@ enum UsageReader {
             snap.antigravity = readAntigravityToday()
         }
         snap.hourlyUsage = readHourlyUsage()
+        if includePeriodStats { snap.periodCosts = periodCosts() }
         snap.updatedAt = Date()
         return snap
     }
@@ -102,8 +107,14 @@ enum UsageReader {
     }
 
     private static func filesModifiedToday(under root: URL, ext: String) -> [URL] {
+        filesModified(under: root, ext: ext, sinceDaysAgo: 1)
+    }
+
+    /// Files modified within the last `days` local days (1 = today only).
+    /// Backs both the today-only readers and the 7-/30-day period aggregates.
+    private static func filesModified(under root: URL, ext: String, sinceDaysAgo days: Int) -> [URL] {
         let fm = FileManager.default
-        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let cutoff = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-Double(days - 1) * 86400)
         guard let en = fm.enumerator(
             at: root,
             includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
@@ -114,7 +125,7 @@ enum UsageReader {
                   let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
                   vals.isRegularFile == true,
                   let mtime = vals.contentModificationDate,
-                  mtime >= startOfDay
+                  mtime >= cutoff
             else { continue }
             out.append(url)
         }
@@ -150,6 +161,15 @@ enum UsageReader {
         return Calendar.current.isDateInToday(date)
     }
 
+    /// Generalized day-range check for the 7-day/30-day period aggregates.
+    /// Unlike `isTodayLocal` this skips the UTC-prefix fast path — it only
+    /// runs on the slow (30-minute) period-stats cadence, not every tick.
+    private static func isWithinLastDays(isoTimestamp: String, days: Int) -> Bool {
+        guard let date = parseISO(isoTimestamp) else { return false }
+        let cutoff = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-Double(days - 1) * 86400)
+        return date >= cutoff
+    }
+
     private static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -164,25 +184,37 @@ enum UsageReader {
     // MARK: - Claude Code
 
     private static func readClaudeToday() -> ClaudeUsage {
+        readClaude(matching: { isTodayLocal(isoTimestamp: $0) },
+                   files: filesModifiedToday(under: claudeDir, ext: "jsonl"))
+    }
+
+    /// 7-/30-day aggregate for the period-cost rows. `daysBack` is inclusive
+    /// of today (7 = today + 6 previous days).
+    private static func readClaude(daysBack: Int) -> ClaudeUsage {
+        readClaude(matching: { isWithinLastDays(isoTimestamp: $0, days: daysBack) },
+                   files: filesModified(under: claudeDir, ext: "jsonl", sinceDaysAgo: daysBack))
+    }
+
+    private static func readClaude(matching isIncluded: (String) -> Bool, files: [URL]) -> ClaudeUsage {
         var usage = ClaudeUsage()
         // Dedupe streamed/rewritten entries: same request may appear multiple
         // times; keep the last occurrence per key.
         var perKey: [String: (input: Int, output: Int, cacheW: Int, cacheR: Int, model: String?, ts: String)] = [:]
         var sessions = Set<String>()
 
-        for file in filesModifiedToday(under: claudeDir, ext: "jsonl") {
-            var fileHasToday = false
+        for file in files {
+            var fileMatched = false
             forEachLine(of: file) { line in
                 guard line.contains("\"usage\""), line.contains("\"assistant\"") else { return }
                 guard let data = line.data(using: .utf8),
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       (obj["type"] as? String) == "assistant",
                       let ts = obj["timestamp"] as? String,
-                      isTodayLocal(isoTimestamp: ts),
+                      isIncluded(ts),
                       let message = obj["message"] as? [String: Any],
                       let u = message["usage"] as? [String: Any]
                 else { return }
-                fileHasToday = true
+                fileMatched = true
                 let key = (obj["requestId"] as? String)
                     ?? (message["id"] as? String)
                     ?? (obj["uuid"] as? String)
@@ -196,7 +228,7 @@ enum UsageReader {
                     ts: ts
                 )
             }
-            if fileHasToday { sessions.insert(file.path) }
+            if fileMatched { sessions.insert(file.path) }
         }
 
         var latestTS = ""
@@ -296,8 +328,19 @@ enum UsageReader {
     // MARK: - Codex
 
     private static func readCodexToday() -> CodexUsage {
+        readCodex(matching: { isTodayLocal(isoTimestamp: $0) },
+                  files: filesModifiedToday(under: codexDir, ext: "jsonl"))
+    }
+
+    /// 7-/30-day aggregate for the period-cost rows (see `readClaude(daysBack:)`).
+    private static func readCodex(daysBack: Int) -> CodexUsage {
+        readCodex(matching: { isWithinLastDays(isoTimestamp: $0, days: daysBack) },
+                  files: filesModified(under: codexDir, ext: "jsonl", sinceDaysAgo: daysBack))
+    }
+
+    private static func readCodex(matching isIncluded: (String) -> Bool, files: [URL]) -> CodexUsage {
         var usage = CodexUsage()
-        for file in filesModifiedToday(under: codexDir, ext: "jsonl") {
+        for file in files {
             // total_token_usage is cumulative per session; last event wins.
             var last: [String: Int]?
             var lastTS: String?
@@ -313,7 +356,7 @@ enum UsageReader {
                 last = total.compactMapValues { $0 as? Int }
                 lastTS = obj["timestamp"] as? String
             }
-            guard let t = last, let ts = lastTS, isTodayLocal(isoTimestamp: ts) else { continue }
+            guard let t = last, let ts = lastTS, isIncluded(ts) else { continue }
             usage.inputTokens += t["input_tokens"] ?? 0
             usage.cachedInputTokens += t["cached_input_tokens"] ?? 0
             usage.outputTokens += t["output_tokens"] ?? 0
@@ -352,6 +395,47 @@ enum UsageReader {
         return usage
     }
 
+    /// Prompt count over the last `daysBack` local days, for the 7-/30-day
+    /// cost rows (Antigravity cost is priced per prompt, see Pricing.swift).
+    private static func antigravityPromptCount(daysBack: Int) -> Int {
+        let historyFile = antigravityDir.appendingPathComponent("history.jsonl")
+        guard FileManager.default.fileExists(atPath: historyFile.path) else { return 0 }
+        let cutoff = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-Double(daysBack - 1) * 86400)
+        var count = 0
+        forEachLine(of: historyFile) { line in
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let timestampMS = obj["timestamp"] as? Double
+            else { return }
+            if Date(timeIntervalSince1970: timestampMS / 1000.0) >= cutoff { count += 1 }
+        }
+        return count
+    }
+
+    /// 7-/30-day cumulative estimated cost per provider, for the dropdown's
+    /// period-cost rows. Meaningfully heavier than the today-only reads (scans
+    /// up to 30 days of logs), so callers should throttle this independently
+    /// — see `includePeriodStats` on `snapshot(_:_:)`.
+    static func periodCosts() -> PeriodCosts {
+        let fm = FileManager.default
+        var out = PeriodCosts()
+        if fm.fileExists(atPath: claudeDir.path) {
+            out.claudeUSD7 = Pricing.claudeCostUSD(readClaude(daysBack: 7))
+            out.claudeUSD30 = Pricing.claudeCostUSD(readClaude(daysBack: 30))
+        }
+        if fm.fileExists(atPath: codexDir.path) {
+            out.codexUSD7 = Pricing.codexCostUSD(readCodex(daysBack: 7))
+            out.codexUSD30 = Pricing.codexCostUSD(readCodex(daysBack: 30))
+        }
+        if fm.fileExists(atPath: antigravityDir.path) {
+            var u7 = AntigravityUsage(); u7.totalPrompts = antigravityPromptCount(daysBack: 7)
+            var u30 = AntigravityUsage(); u30.totalPrompts = antigravityPromptCount(daysBack: 30)
+            out.antigravityUSD7 = Pricing.antigravityCostUSD(u7)
+            out.antigravityUSD30 = Pricing.antigravityCostUSD(u30)
+        }
+        return out
+    }
+
     /// Antigravity stores quota responses in different cache locations across
     /// CLI versions. Read only JSON responses that contain the stable
     /// remainingFraction/resetTime pair, and classify the two windows by the
@@ -375,8 +459,14 @@ enum UsageReader {
                       let object = try? JSONSerialization.jsonObject(with: data)
                 else { continue }
                 for candidate in quotaCandidates(in: object) {
-                    let until = candidate.reset.timeIntervalSinceNow
-                    let isShort = until > 0 && until <= 12 * 3600
+                    // Classify by the window's length at capture time (reset
+                    // minus the snapshot's own mtime), not by time-until-reset
+                    // from now. A window classified relative to "now" drops
+                    // out of both buckets the instant it rolls over but before
+                    // Antigravity writes a fresh cache file, making the row
+                    // vanish from the menu even though today's usage exists.
+                    let duration = candidate.reset.timeIntervalSince(modified)
+                    let isShort = duration > 0 && duration <= 12 * 3600
                     guard isShort == shortWindow else { continue }
                     let window = LimitWindow(usedPercent: max(0, min(100, (1 - candidate.remaining) * 100)), resetsAt: candidate.reset)
                     if newest == nil || modified > newest!.modified { newest = (window, modified) }

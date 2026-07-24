@@ -27,6 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let claudePollOK: TimeInterval = 300
     private let claudePollBackoff: TimeInterval = 600
     private var manualRefresh = false
+    // 7-/30-day cost aggregates are much heavier to compute than the
+    // today-only reads (scans up to 30 days of logs), so they're recomputed
+    // on their own slow cadence and cached like lastGoodClaude above.
+    private var lastGoodPeriodCosts: PeriodCosts?
+    private var nextPeriodStatsAt = Date.distantPast
+    private let periodStatsInterval: TimeInterval = 30 * 60
     // A limits fetch can block for a long time on the keychain-permission
     // dialog; never start a second one while the first is still out, or every
     // 60s tick stacks another password prompt behind the dialog.
@@ -98,20 +104,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func settingsClicked() { SettingsWindowController.shared.show() }
     @objc private func quitClicked() { NSApp.terminate(nil) }
 
+    /// Cheap Date compare on every tick; the actual network call only fires
+    /// once every ~6h (or never, if the user turned auto-fetch off).
+    private func maybeRefreshExchangeRate() {
+        let s = AppSettings.shared
+        guard s.thbAutoFetch else { return }
+        let stale = s.thbLastFetched.map { Date().timeIntervalSince($0) > 6 * 3600 } ?? true
+        guard stale else { return }
+        ExchangeRateFetcher.fetchUSDtoTHB { rate in
+            guard let rate else { return }
+            AppSettings.shared.thbPerUSD = rate
+            AppSettings.shared.thbLastFetched = Date()
+        }
+    }
+
     private func refresh() {
+        maybeRefreshExchangeRate()
         nextRefreshAt = Date().addingTimeInterval(refreshInterval)
         let inPenaltyBox = Date() < (rateLimitedUntil ?? .distantPast)
         let doLimits = (manualRefresh || Date() >= nextClaudeFetch)
             && !limitsFetchInFlight && !inPenaltyBox
         manualRefresh = false
         if doLimits { limitsFetchInFlight = true }
+        let doPeriodStats = Date() >= nextPeriodStatsAt
         DispatchQueue.global(qos: .utility).async {
-            let snap = UsageReader.snapshot(fetchClaudeLimits: doLimits)
+            let snap = UsageReader.snapshot(fetchClaudeLimits: doLimits, includePeriodStats: doPeriodStats)
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
+                var snap = snap
                 if doLimits {
                     self.limitsFetchInFlight = false
                     self.scheduleNextClaudeFetch(snap.claudeLimits)
+                }
+                if doPeriodStats {
+                    self.lastGoodPeriodCosts = snap.periodCosts
+                    self.nextPeriodStatsAt = Date().addingTimeInterval(self.periodStatsInterval)
+                } else {
+                    snap.periodCosts = self.lastGoodPeriodCosts
                 }
                 self.apply(snap)
             }
@@ -222,48 +251,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
 
-        if let c = snap.claude {
-            menu.addItem(headerItem("Claude Code", icon: BrandIcons.claude, iconTint: BrandIcons.claudeBrandColor))
-            if let problem = claudeAPIProblem {
-                var text = "⚠︎ \(problem)"
-                if let goodAt = lastGoodClaude?.fetchedAt {
-                    text += " · showing data from \(humanAgo(goodAt))"
-                }
-                menu.addItem(note(text))
+        for kind in AppSettings.shared.providerOrder {
+            switch kind {
+            case .claude: addClaudeSection(menu, snap, claudeAPIProblem)
+            case .codex: addCodexSection(menu, snap)
+            case .antigravity: addAntigravitySection(menu, snap)
             }
-            addClaudeLimits(menu, snap.claudeLimits)
-            menu.addItem(caption("Today's tokens"))
-            menu.addItem(statPairItem("Total", formatTokens(c.total), "Sessions", "\(c.sessionCount)"))
-            menu.addItem(statPairItem("Input", formatTokens(c.inputTokens), "Output", formatTokens(c.outputTokens)))
-            menu.addItem(statPairItem("Cache write", formatTokens(c.cacheCreationTokens), "Cache read", formatTokens(c.cacheReadTokens)))
-            if let m = c.lastModel { menu.addItem(row("Last model", m)) }
-            let usd = Pricing.claudeCostUSD(c)
-            menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-            menu.addItem(.separator())
-        }
-
-        if let x = snap.codex {
-            var title = "Codex"
-            if let plan = snap.codexLimits?.planType { title += " (\(plan))" }
-            menu.addItem(headerItem(title, icon: BrandIcons.codex))
-            addCodexLimits(menu, snap.codexLimits)
-            menu.addItem(caption("Today's tokens"))
-            menu.addItem(statPairItem("Total", formatTokens(x.totalTokens), "Sessions", "\(x.sessionCount)"))
-            menu.addItem(statPairItem("Input", formatTokens(x.inputTokens), "Cached in", formatTokens(x.cachedInputTokens)))
-            menu.addItem(statPairItem("Output", formatTokens(x.outputTokens), "Reasoning", formatTokens(x.reasoningTokens)))
-            let usd = Pricing.codexCostUSD(x)
-            menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-            menu.addItem(.separator())
-        }
-
-        if let g = snap.antigravity {
-            menu.addItem(headerItem("Antigravity", icon: BrandIcons.gemini, iconTint: BrandIcons.geminiBrandColor))
-            addAntigravityLimits(menu, g)
-            menu.addItem(caption("Today's activity"))
-            menu.addItem(statPairItem("Prompts", "\(g.totalPrompts)", "Sessions", "\(g.sessionCount)"))
-            let usd = Pricing.antigravityCostUSD(g)
-            menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
-            menu.addItem(.separator())
         }
 
         if snap.claude == nil && snap.codex == nil && snap.antigravity == nil {
@@ -307,20 +300,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    private func updateStatusBarTitle(_ snap: UsageSnapshot) {
+    // MARK: - Provider sections (order driven by AppSettings.providerOrder)
+
+    private func addClaudeSection(_ menu: NSMenu, _ snap: UsageSnapshot, _ claudeAPIProblem: String?) {
+        guard let c = snap.claude else { return }
+        menu.addItem(headerItem("Claude Code", icon: BrandIcons.claude, iconTint: BrandIcons.claudeBrandColor))
+        if let problem = claudeAPIProblem {
+            var text = "⚠︎ \(problem)"
+            if let goodAt = lastGoodClaude?.fetchedAt {
+                text += " · showing data from \(humanAgo(goodAt))"
+            }
+            menu.addItem(note(text))
+        }
+        addClaudeLimits(menu, snap.claudeLimits)
+        menu.addItem(caption("Today's tokens"))
+        menu.addItem(statPairItem("Total", formatTokens(c.total), "Sessions", "\(c.sessionCount)"))
+        menu.addItem(statPairItem("Input", formatTokens(c.inputTokens), "Output", formatTokens(c.outputTokens)))
+        menu.addItem(statPairItem("Cache write", formatTokens(c.cacheCreationTokens), "Cache read", formatTokens(c.cacheReadTokens)))
+        let s = AppSettings.shared
+        if s.showCacheHitRate { menu.addItem(row("Cache hit rate", "\(Int(Pricing.claudeCacheHitRatePercent(c).rounded()))%")) }
+        if s.showModelBreakdown && c.perModel.count > 1 {
+            menu.addItem(caption("By model"))
+            let models = c.perModel
+                .map { (model: $0.key, tokens: $0.value, costUSD: Pricing.claudeModelCostUSD($0.value, model: $0.key)) }
+                .sorted { $0.costUSD > $1.costUSD }
+            for m in models {
+                let total = m.tokens.input + m.tokens.output + m.tokens.cacheWrite + m.tokens.cacheRead
+                menu.addItem(row(m.model, "\(formatTokens(total)) · \(formatUSD(m.costUSD))"))
+            }
+        }
+        if let m = c.lastModel { menu.addItem(row("Last model", m)) }
+        let usd = Pricing.claudeCostUSD(c)
+        if s.showAvgPerSession {
+            menu.addItem(row("Avg/session", "\(formatTokens(c.total / max(1, c.sessionCount))) · \(formatUSD(usd / Double(max(1, c.sessionCount))))"))
+        }
+        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
+        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.claudeUSD7, let d30 = pc.claudeUSD30 {
+            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
+        }
+        menu.addItem(.separator())
+    }
+
+    private func addCodexSection(_ menu: NSMenu, _ snap: UsageSnapshot) {
+        guard let x = snap.codex else { return }
+        var title = "Codex"
+        if let plan = snap.codexLimits?.planType { title += " (\(plan))" }
+        menu.addItem(headerItem(title, icon: BrandIcons.codex))
+        addCodexLimits(menu, snap.codexLimits)
+        menu.addItem(caption("Today's tokens"))
+        menu.addItem(statPairItem("Total", formatTokens(x.totalTokens), "Sessions", "\(x.sessionCount)"))
+        menu.addItem(statPairItem("Input", formatTokens(x.inputTokens), "Cached in", formatTokens(x.cachedInputTokens)))
+        menu.addItem(statPairItem("Output", formatTokens(x.outputTokens), "Reasoning", formatTokens(x.reasoningTokens)))
+        let s = AppSettings.shared
+        if s.showCacheHitRate { menu.addItem(row("Cache hit rate", "\(Int(Pricing.codexCacheHitRatePercent(x).rounded()))%")) }
+        let usd = Pricing.codexCostUSD(x)
+        if s.showAvgPerSession {
+            menu.addItem(row("Avg/session", "\(formatTokens(x.totalTokens / max(1, x.sessionCount))) · \(formatUSD(usd / Double(max(1, x.sessionCount))))"))
+        }
+        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
+        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.codexUSD7, let d30 = pc.codexUSD30 {
+            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
+        }
+        menu.addItem(.separator())
+    }
+
+    private func addAntigravitySection(_ menu: NSMenu, _ snap: UsageSnapshot) {
+        guard let g = snap.antigravity else { return }
+        menu.addItem(headerItem("Antigravity", icon: BrandIcons.gemini, iconTint: BrandIcons.geminiBrandColor))
+        addAntigravityLimits(menu, g)
+        menu.addItem(caption("Today's activity"))
+        menu.addItem(statPairItem("Prompts", "\(g.totalPrompts)", "Sessions", "\(g.sessionCount)"))
+        let usd = Pricing.antigravityCostUSD(g)
+        let s = AppSettings.shared
+        if s.showAvgPerSession {
+            menu.addItem(row("Avg/session", "\(g.totalPrompts / max(1, g.sessionCount))P · \(formatUSD(usd / Double(max(1, g.sessionCount))))"))
+        }
+        menu.addItem(row("Est. cost", "\(formatTHB(usd)) · \(formatUSD(usd))"))
+        if s.showPeriodCost, let pc = snap.periodCosts, let d7 = pc.antigravityUSD7, let d30 = pc.antigravityUSD30 {
+            menu.addItem(statPairItem("7-day", formatUSD(d7), "30-day", formatUSD(d30)))
+        }
+        menu.addItem(.separator())
+    }
+
+    private func statusBarPart(for kind: ProviderKind, _ snap: UsageSnapshot) -> (icon: NSImage, text: String, warning: Bool)? {
         let warnBelow = AppSettings.shared.warnBelowRemaining
-        var parts: [(icon: NSImage, text: String, warning: Bool)] = []
-        if snap.claude != nil { let low = lowestClaudeRemaining(snap); parts.append((BrandIcons.claude, claudeTitleValue(snap), (low ?? 100) < warnBelow)) }
-        if let x = snap.codex { if let v = codexTitleValue(snap) { parts.append((BrandIcons.codex, v.text, v.remaining < warnBelow)) } else { parts.append((BrandIcons.codex, formatTokens(x.totalTokens), false)) } }
-        if let g = snap.antigravity {
+        switch kind {
+        case .claude:
+            guard snap.claude != nil else { return nil }
+            let low = lowestClaudeRemaining(snap)
+            return (BrandIcons.claude, claudeTitleValue(snap), (low ?? 100) < warnBelow)
+        case .codex:
+            guard let x = snap.codex else { return nil }
+            if let v = codexTitleValue(snap) { return (BrandIcons.codex, v.text, v.remaining < warnBelow) }
+            return (BrandIcons.codex, formatTokens(x.totalTokens), false)
+        case .antigravity:
+            guard let g = snap.antigravity else { return nil }
             let windows = [g.fiveHour, g.weekly].compactMap { $0 }
             let icon = g.isWorking ? BrandIcons.rotated(BrandIcons.gemini, angle: animationPhase) : BrandIcons.gemini
             if let remaining = windows.map(\.remainingPercent).min() {
-                parts.append((icon, AppSettings.shared.displayMode.shortText(remaining: remaining), remaining < warnBelow))
-            } else {
-                parts.append((icon, "\(g.totalPrompts)P", false))
+                return (icon, AppSettings.shared.displayMode.shortText(remaining: remaining), remaining < warnBelow)
             }
+            return (icon, "\(g.totalPrompts)P", false)
         }
+    }
+
+    private func updateStatusBarTitle(_ snap: UsageSnapshot) {
+        let parts = AppSettings.shared.providerOrder.compactMap { statusBarPart(for: $0, snap) }
         guard let button = statusItem.button else { return }
         let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
         let title = NSMutableAttributedString()
@@ -329,8 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addAntigravityLimits(_ menu: NSMenu, _ usage: AntigravityUsage) {
-        if let fiveHour = usage.fiveHour { menu.addItem(limitRowItem(name: "5-hour", window: fiveHour)) }
-        if let weekly = usage.weekly { menu.addItem(limitRowItem(name: "Weekly", window: weekly)) }
+        windowRows(menu, "5-hour", usage.fiveHour)
+        windowRows(menu, "Weekly", usage.weekly)
         if usage.fiveHour == nil && usage.weekly == nil { menu.addItem(note("No quota data yet — use Antigravity once to refresh it")) }
     }
 
@@ -365,11 +450,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addClaudeLimits(_ menu: NSMenu, _ limits: ClaudeLimits?) {
-        guard let l = limits else { return }
+        guard let l = limits else {
+            menu.addItem(note("Fetching limits…"))
+            return
+        }
         switch l.state {
         case .ok:
-            windowRows(menu, "5-hour", l.fiveHour)
-            windowRows(menu, "Weekly", l.sevenDay)
+            let s = AppSettings.shared
+            var shown = false
+            if s.showFiveHourInMenuBar { windowRows(menu, "5-hour", l.fiveHour); shown = true }
+            if s.showWeeklyInMenuBar { windowRows(menu, "Weekly", l.sevenDay); shown = true }
+            if !shown { menu.addItem(note("Both windows hidden — enable in Settings › Providers")) }
         case .rateLimited, .error:
             // Cause already shown by the ⚠︎ status note; nothing cached to draw.
             menu.addItem(note("No limit data to show yet — retrying next refresh"))

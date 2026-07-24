@@ -80,11 +80,35 @@ enum Pricing {
         }
     }
 
+    /// USD value of a single model's token slice, for the per-model breakdown
+    /// rows in the dropdown.
+    static func claudeModelCostUSD(_ tokens: ModelTokens, model: String) -> Double {
+        let r = claudeRates(model: model)
+        return cost(input: tokens.input, output: tokens.output,
+                    cacheW: tokens.cacheWrite, cacheR: tokens.cacheRead, rates: r)
+    }
+
     static func codexCostUSD(_ usage: CodexUsage) -> Double {
         let fresh = Double(max(0, usage.inputTokens - usage.cachedInputTokens))
         let cached = Double(usage.cachedInputTokens)
         let out = Double(usage.outputTokens)  // includes reasoning tokens
         return (fresh * codexRates.input + cached * codexRates.cachedInput + out * codexRates.output) / 1_000_000
+    }
+
+    /// % of prompt-input-equivalent tokens served from cache rather than
+    /// fresh — a rough savings signal, not billed separately from the rows
+    /// it's derived from.
+    static func claudeCacheHitRatePercent(_ usage: ClaudeUsage) -> Double {
+        let total = usage.inputTokens + usage.cacheReadTokens
+        guard total > 0 else { return 0 }
+        return Double(usage.cacheReadTokens) / Double(total) * 100
+    }
+
+    /// Codex's `inputTokens` already includes `cachedInputTokens` (see the
+    /// `fresh = inputTokens - cachedInputTokens` subtraction in `codexCostUSD`).
+    static func codexCacheHitRatePercent(_ usage: CodexUsage) -> Double {
+        guard usage.inputTokens > 0 else { return 0 }
+        return Double(usage.cachedInputTokens) / Double(usage.inputTokens) * 100
     }
 
     private static func cost(input: Int, output: Int, cacheW: Int, cacheR: Int, rates r: TokenRates) -> Double {

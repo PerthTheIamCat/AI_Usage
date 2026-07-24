@@ -2,7 +2,7 @@
 
 All notable changes to AI Usage Bar are documented in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-07-24
 
 ### Added
 
@@ -12,6 +12,28 @@ All notable changes to AI Usage Bar are documented in this file.
   quota data is available.
 - Animate the Antigravity logo in the menu bar while an AI task is running.
 - Fall back to Antigravity prompt counts when quota data is unavailable.
+- Reorderable provider order: drag Claude/Codex/Antigravity into any order in
+  Settings › Providers — the same order now drives both the status-bar
+  segments and the dropdown sections.
+- More dropdown data: per-model cost/token breakdown (Claude), cache hit
+  rate, average cost/tokens per session, and 7-day/30-day cumulative cost per
+  provider.
+- Live USD→THB exchange rate, auto-fetched periodically from
+  api.frankfurter.app (Settings › Cost), with a manual override and a
+  Refresh Now button.
+- Settings window redesigned as four top tabs (General / Providers / Cost /
+  Log) instead of one long scrolling form; the log viewer now has its own
+  page.
+
+### Fixed
+
+- Antigravity 5-hour/weekly rows no longer silently disappear right around a
+  window's rollover — they now show a "window reset" note like Claude/Codex
+  instead of vanishing even though today's usage exists.
+- Claude limit rows no longer show a blank gap before the first fetch
+  resolves; a "Fetching limits…" note shows instead.
+- The 5-hour/Weekly toggle in Settings now actually hides/shows the
+  corresponding row in the dropdown, not just the menu-bar title.
 
 ## [0.4.0] - 2026-07-15
 

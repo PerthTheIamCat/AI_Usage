@@ -48,6 +48,17 @@ struct HourlyUsage {
     }
 }
 
+/// 7-/30-day cumulative estimated cost per provider (USD). Populated only
+/// when a snapshot opts in via `includePeriodStats` — see UsageReader.swift.
+struct PeriodCosts {
+    var claudeUSD7: Double?
+    var claudeUSD30: Double?
+    var codexUSD7: Double?
+    var codexUSD30: Double?
+    var antigravityUSD7: Double?
+    var antigravityUSD30: Double?
+}
+
 struct UsageSnapshot {
     var claude: ClaudeUsage?       // nil = not detected
     var codex: CodexUsage?         // nil = not detected
@@ -55,6 +66,7 @@ struct UsageSnapshot {
     var claudeLimits: ClaudeLimits?
     var codexLimits: CodexLimits?
     var hourlyUsage = HourlyUsage()
+    var periodCosts: PeriodCosts?
     var updatedAt = Date()
 }
 
